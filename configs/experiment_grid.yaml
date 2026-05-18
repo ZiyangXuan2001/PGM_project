@@ -1,0 +1,68 @@
+dataset:
+  name: diving48_v2
+  num_classes: 48
+  embedding_root: "data/diving48_v2/embeddings/clip_vit_b16"
+  train_file: "train.pt"
+  val_file: "test.pt"
+  test_file: "test.pt"
+
+model:
+  ablation_id: E4
+  variant: diff_pgm_info_attention
+
+backbone:
+  name: precomputed_clip_vit_b16
+  input_dim: 512
+  num_frames: 16
+
+diff_nn:
+  type: pairwise_diff_net
+  d_y: 128
+  hidden_dim: 256
+  dropout: 0.1
+
+pgm_smoother:
+  type: gaussian_chain
+  lambda_smooth: 1.0
+
+information_matrix:
+  type: accumulator
+  K: 8
+  d_h: 128
+  use_alpha: true
+  eta: 1.0
+
+classifier:
+  type: attention_pool
+  hidden_dim: 256
+  dropout: 0.2
+  num_heads: 4
+
+grid:
+  ablations:
+    - E0
+    - E1
+    - E2
+    - E3
+    - E4
+  lambda_values:
+    - 1.0
+  use_alpha_values:
+    - true
+
+training:
+  epochs: 30
+  batch_size: 64
+  lr: 1e-4
+  weight_decay: 1e-4
+  seed: 0
+  device: auto
+  save_best: true
+
+output:
+  root: "outputs/runs"
+  results_csv: "runs/diving48_v2_grid/results.csv"
+
+logging:
+  use_wandb: false
+  wandb_project: diving48-diff-pgm-info

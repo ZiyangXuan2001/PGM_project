@@ -1,0 +1,3 @@
+run_name,date,ablation_id,model_variant,backbone,input_type,num_frames,pgm_smoother,lambda_smooth,information_matrix,use_alpha,classifier,batch_size,lr,epochs,best_val_top1,best_val_epoch,test_top1,checkpoint_best,run_dir,notes
+
+2026-05-18_E0_mean_pool_baseline_lambdanone_alphafalse_mlp_ed5b,2026-05-18T14:59:28,E0,mean_pool_baseline,precomputed_clip_vit_b16,precomputed_clip_vit_b16_frame_embeddings,16,none,,none,False,mlp,4,1e-4,1,0.0,1,,/tmp/pgm_project_runpod_full_runs/2026-05-18_E0_mean_pool_baseline_lambdanone_alphafalse_mlp_ed5b/checkpoints/best.pt,/tmp/pgm_project_runpod_full_runs/2026-05-18_E0_mean_pool_baseline_lambdanone_alphafalse_mlp_ed5b,RunPod full training launcher run.

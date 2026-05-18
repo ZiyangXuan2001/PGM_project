@@ -1,0 +1,18 @@
+# Data and outputs
+data/
+runs/
+outputs/runs/*/
+outputs/small_ablation_inputs/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+*.egg-info/
+dist/
+build/
+
+# OS
+.DS_Store
