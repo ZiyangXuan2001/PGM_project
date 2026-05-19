@@ -89,6 +89,20 @@ python scripts/runpod_main.py \
 If the official Diving48 URLs change, override them with `--train-url`,
 `--test-url`, `--vocab-url`, and `--video-url`.
 
+Note: the UCSD annotation URLs can return HTTP 403 from cloud machines. If that
+happens, your GPU/model environment is still fine. Put the three annotation
+files under `/workspace/data/diving48_v2/annotations/` manually, or use
+OpenDataLab/MMAction2:
+
+```bash
+pip install -U openmim opendatalab
+odl login
+mim download mmaction2 --dataset diving48
+```
+
+The video archive default in this project uses the Hugging Face mirror:
+`bkprocovid19/diving48`.
+
 ## Small Training Workflow
 
 Fake-data training checks code, logging, checkpoints, and the experiment
