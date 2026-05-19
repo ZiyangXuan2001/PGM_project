@@ -33,6 +33,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Use the original UCSD video URL instead of the Hugging Face mirror.",
     )
+    parser.add_argument(
+        "--skip-annotations",
+        action="store_true",
+        help="Do not download annotation JSON files; assume they are already present.",
+    )
     parser.add_argument("--skip-videos", action="store_true", help="Only download annotation files.")
     parser.add_argument("--extract", action="store_true", help="Extract the video archive after download.")
     parser.add_argument("--force", action="store_true", help="Re-download files even if they already exist.")
@@ -167,7 +172,10 @@ def main() -> None:
     download_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"dataset_root: {dataset_root}")
-    download_annotations(args, annotation_dir)
+    if args.skip_annotations:
+        print(f"annotation download skipped; expecting existing files under {annotation_dir}")
+    else:
+        download_annotations(args, annotation_dir)
 
     if not args.skip_videos:
         if args.official_video_url:

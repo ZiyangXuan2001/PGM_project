@@ -103,6 +103,23 @@ mim download mmaction2 --dataset diving48
 The video archive default in this project uses the Hugging Face mirror:
 `bkprocovid19/diving48`.
 
+If you upload the annotation files yourself and want RunPod to download only
+the large video archive, use:
+
+```bash
+python scripts/runpod_main.py \
+  --stage dataset_small \
+  --dataset-root /workspace/data/diving48_v2 \
+  --embeddings-root /workspace/data/diving48_embeddings \
+  --skip-annotations \
+  --download-videos \
+  --max-extract-samples 16 \
+  --max-train-samples 64 \
+  --epochs 2 \
+  --batch-size 16 \
+  --variants E0,E4
+```
+
 ## Small Training Workflow
 
 Fake-data training checks code, logging, checkpoints, and the experiment

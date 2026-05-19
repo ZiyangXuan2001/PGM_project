@@ -24,6 +24,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--embeddings-root", type=Path, default=DEFAULT_EMBEDDINGS_ROOT)
     parser.add_argument("--download-videos", action="store_true", help="Download the full Diving48 video archive.")
     parser.add_argument("--skip-download", action="store_true", help="Use existing dataset files instead of downloading.")
+    parser.add_argument(
+        "--skip-annotations",
+        action="store_true",
+        help="When downloading, skip annotation JSON download and use existing uploaded files.",
+    )
     parser.add_argument("--skip-extract-embeddings", action="store_true", help="Use an existing small train.pt file.")
     parser.add_argument("--train-url", default=None)
     parser.add_argument("--test-url", default=None)
@@ -113,6 +118,8 @@ def run_download(args: argparse.Namespace) -> None:
     ]
     if not args.download_videos:
         cmd.append("--skip-videos")
+    if args.skip_annotations:
+        cmd.append("--skip-annotations")
     for flag, value in [
         ("--train-url", args.train_url),
         ("--test-url", args.test_url),
