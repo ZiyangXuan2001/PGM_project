@@ -42,6 +42,53 @@ python scripts/check_runpod_environment.py --config configs/default.yaml
 It prints Python, PyTorch, CUDA, GPU, `/workspace`, config loading, output
 writability, and random tensor forward checks for E0-E4.
 
+## One-Command Main Interface
+
+Use this first. It checks the environment, runs a tiny fake training job, and
+prints `RUNPOD_MAIN_STATUS: OK` if the pipeline is healthy.
+
+```bash
+python scripts/runpod_main.py \
+  --stage fake_small \
+  --max-train-samples 128 \
+  --epochs 2 \
+  --batch-size 16 \
+  --variants all
+```
+
+To download/prepare Diving48 V2, extract a tiny CLIP embedding subset, and run
+a real tiny training job:
+
+```bash
+python scripts/runpod_main.py \
+  --stage dataset_small \
+  --dataset-root /workspace/data/diving48_v2 \
+  --embeddings-root /workspace/data/diving48_embeddings \
+  --download-videos \
+  --max-extract-samples 16 \
+  --max-train-samples 64 \
+  --epochs 2 \
+  --batch-size 16 \
+  --variants E0,E4
+```
+
+Important: `--download-videos` downloads the full Diving48 video archive, which
+is large. If the dataset is already present, use:
+
+```bash
+python scripts/runpod_main.py \
+  --stage dataset_small \
+  --dataset-root /workspace/data/diving48_v2 \
+  --embeddings-root /workspace/data/diving48_embeddings \
+  --skip-download \
+  --max-extract-samples 16 \
+  --epochs 2 \
+  --variants E0,E4
+```
+
+If the official Diving48 URLs change, override them with `--train-url`,
+`--test-url`, `--vocab-url`, and `--video-url`.
+
 ## Small Training Workflow
 
 Fake-data training checks code, logging, checkpoints, and the experiment
@@ -180,4 +227,3 @@ For a full archive, download:
 outputs/
 experiments/experiment_registry.csv
 ```
-
