@@ -50,12 +50,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_samples_per_split", type=int, default=None)
     parser.add_argument("--backbone_name", default="ViT-B/16")
     parser.add_argument("--embedding_subdir", default="clip_vit_b16")
-    parser.add_argument("--device", default="cpu", choices=["cpu", "cuda", "mps"])
+    parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda", "mps"])
     parser.add_argument("--batch_size", type=int, default=64)
     return parser.parse_args()
 
 
 def resolve_device(device_name: str) -> torch.device:
+    if device_name == "auto":
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            return torch.device("mps")
+        return torch.device("cpu")
     if device_name == "cuda" and not torch.cuda.is_available():
         raise SystemExit("CUDA was requested but is not available.")
     if device_name == "mps":
