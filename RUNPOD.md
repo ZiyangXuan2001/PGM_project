@@ -2,7 +2,7 @@
 
 This project trains on precomputed CLIP ViT-B/16 frame embeddings for Diving48 V2.
 RunPod should only run the existing E0-E4 controlled variants. It should not
-download Diving48 or extract new backbones during these launch scripts.
+add new backbones during these launch scripts.
 
 ## Recommended RunPod Setup
 
@@ -56,8 +56,8 @@ python scripts/runpod_main.py \
   --variants all
 ```
 
-To download/prepare Diving48 V2, extract a tiny CLIP embedding subset, and run
-a real tiny training job:
+To download/prepare Diving48 V2 from Hugging Face, extract a tiny CLIP
+embedding subset, and run a real tiny training job:
 
 ```bash
 python scripts/runpod_main.py \
@@ -73,7 +73,9 @@ python scripts/runpod_main.py \
 ```
 
 Important: `--download-videos` downloads the full Diving48 video archive, which
-is large. If the dataset is already present, use:
+is large. Annotation JSON files are generated from the Hugging Face
+`mteb/diving48` row metadata. The video archive default uses the Hugging Face
+mirror `bkprocovid19/diving48`. If the dataset is already present, use:
 
 ```bash
 python scripts/runpod_main.py \
@@ -86,13 +88,26 @@ python scripts/runpod_main.py \
   --variants E0,E4
 ```
 
-If the official Diving48 URLs change, override them with `--train-url`,
-`--test-url`, `--vocab-url`, and `--video-url`.
+If the Hugging Face row metadata is temporarily rate-limited, rerun the same
+command later or lower the page size:
 
-Note: the UCSD annotation URLs can return HTTP 403 from cloud machines. If that
-happens, your GPU/model environment is still fine. Put the three annotation
-files under `/workspace/data/diving48_v2/annotations/` manually, or use
-OpenDataLab/MMAction2:
+```bash
+python scripts/runpod_main.py \
+  --stage dataset_small \
+  --dataset-root /workspace/data/diving48_v2 \
+  --embeddings-root /workspace/data/diving48_embeddings \
+  --download-videos \
+  --hf-page-size 50 \
+  --max-extract-samples 16 \
+  --epochs 2 \
+  --variants E0,E4
+```
+
+If you specifically want the legacy UCSD annotation URLs, use
+`--annotation-source ucsd` and optionally override `--train-url`, `--test-url`,
+`--vocab-url`, and `--video-url`. The UCSD annotation URLs can return HTTP 403
+from cloud machines. If that happens, your GPU/model environment is still fine.
+You can also use OpenDataLab/MMAction2:
 
 ```bash
 pip install -U openmim opendatalab
@@ -100,11 +115,8 @@ odl login
 mim download mmaction2 --dataset diving48
 ```
 
-The video archive default in this project uses the Hugging Face mirror:
-`bkprocovid19/diving48`.
-
-If you upload the annotation files yourself and want RunPod to download only
-the large video archive, use:
+If you already uploaded annotation files yourself and want RunPod to download
+only the large video archive, use:
 
 ```bash
 python scripts/runpod_main.py \

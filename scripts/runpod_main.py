@@ -34,6 +34,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--test-url", default=None)
     parser.add_argument("--vocab-url", default=None)
     parser.add_argument("--video-url", default=None)
+    parser.add_argument("--annotation-source", choices=["hf", "ucsd"], default="hf")
+    parser.add_argument("--hf-page-size", type=int, default=100)
     parser.add_argument("--max-source-checks", type=int, default=5)
     parser.add_argument("--max-extract-samples", type=int, default=16)
     parser.add_argument("--max-train-samples", type=int, default=64)
@@ -120,6 +122,9 @@ def run_download(args: argparse.Namespace) -> None:
         cmd.append("--skip-videos")
     if args.skip_annotations:
         cmd.append("--skip-annotations")
+    else:
+        cmd.extend(["--annotation-source", args.annotation_source])
+        cmd.extend(["--hf-page-size", str(args.hf_page_size)])
     for flag, value in [
         ("--train-url", args.train_url),
         ("--test-url", args.test_url),

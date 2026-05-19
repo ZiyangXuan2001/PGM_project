@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import json
 import tarfile
+import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 from pathlib import Path
+from typing import Any
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -19,6 +23,9 @@ DEFAULT_TEST_URL = "http://www.svcl.ucsd.edu/projects/resound/Diving48_V2_test.j
 DEFAULT_VOCAB_URL = "http://www.svcl.ucsd.edu/projects/resound/Diving48_vocab.json"
 DEFAULT_VIDEO_URL = "https://huggingface.co/datasets/bkprocovid19/diving48/resolve/main/Diving48_rgb.tar.gz"
 OFFICIAL_VIDEO_URL = "http://www.svcl.ucsd.edu/projects/resound/Diving48_rgb.tar.gz"
+HF_ROWS_URL = "https://datasets-server.huggingface.co/rows"
+DEFAULT_HF_DATASET = "mteb/diving48"
+DEFAULT_HF_CONFIG = "default"
 
 
 def parse_args() -> argparse.Namespace:
@@ -28,6 +35,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--test-url", default=DEFAULT_TEST_URL)
     parser.add_argument("--vocab-url", default=DEFAULT_VOCAB_URL)
     parser.add_argument("--video-url", default=DEFAULT_VIDEO_URL)
+    parser.add_argument(
+        "--annotation-source",
+        choices=["hf", "ucsd"],
+        default="hf",
+        help="Download annotations from Hugging Face row metadata or the legacy UCSD JSON URLs.",
+    )
+    parser.add_argument("--hf-dataset", default=DEFAULT_HF_DATASET)
+    parser.add_argument("--hf-config", default=DEFAULT_HF_CONFIG)
+    parser.add_argument("--hf-page-size", type=int, default=100, help="Hugging Face rows API page size, max 100.")
+    parser.add_argument("--hf-max-retries", type=int, default=12)
     parser.add_argument(
         "--official-video-url",
         action="store_true",
@@ -91,19 +108,134 @@ def download_file(url: str, dest: Path, force: bool) -> None:
         raise RuntimeError(f"failed to download {url}: {exc}") from exc
 
 
+def normalize_label_name(value: Any) -> str:
+    if isinstance(value, list):
+        return "_".join(str(part) for part in value)
+    return str(value)
+
+
+def hf_rows_url(dataset: str, config: str, split: str, offset: int, length: int) -> str:
+    query = urllib.parse.urlencode(
+        {
+            "dataset": dataset,
+            "config": config,
+            "split": split,
+            "offset": offset,
+            "length": length,
+        }
+    )
+    return f"{HF_ROWS_URL}?{query}"
+
+
+def fetch_hf_rows(args: argparse.Namespace, split: str, offset: int, length: int) -> dict[str, Any]:
+    url = hf_rows_url(args.hf_dataset, args.hf_config, split, offset, length)
+    last_error: Exception | None = None
+    for attempt in range(1, args.hf_max_retries + 1):
+        request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
+        try:
+            with contextlib.closing(urllib.request.urlopen(request, timeout=90)) as response:
+                return json.load(response)
+        except urllib.error.HTTPError as exc:
+            last_error = exc
+            retry_after = exc.headers.get("Retry-After") if exc.headers else None
+            if exc.code not in {429, 500, 502, 503, 504}:
+                break
+            sleep_sec = int(retry_after) if retry_after and retry_after.isdigit() else min(120, 5 * attempt)
+            print(
+                f"  {split} offset={offset}: HTTP {exc.code}, retry "
+                f"{attempt}/{args.hf_max_retries} after {sleep_sec}s"
+            )
+            time.sleep(sleep_sec)
+        except (urllib.error.URLError, TimeoutError) as exc:
+            last_error = exc
+            sleep_sec = min(120, 5 * attempt)
+            print(f"  {split} offset={offset}: {exc}, retry {attempt}/{args.hf_max_retries} after {sleep_sec}s")
+            time.sleep(sleep_sec)
+    raise RuntimeError(f"failed to fetch Hugging Face rows for {split} offset={offset}: {last_error}")
+
+
+def convert_hf_record(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "vid_name": str(row["vid_name"]),
+        "label": int(row["label"]),
+        "label_name": normalize_label_name(row.get("label_name")),
+        "start_frame": row.get("start_frame"),
+        "end_frame": row.get("end_frame"),
+    }
+
+
+def write_json_atomic(path: Path, data: Any) -> None:
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def download_hf_annotations(args: argparse.Namespace, annotation_dir: Path) -> None:
+    output_files = [
+        annotation_dir / "Diving48_V2_train.json",
+        annotation_dir / "Diving48_V2_test.json",
+        annotation_dir / "Diving48_vocab.json",
+    ]
+    if all(path.is_file() for path in output_files) and not args.force:
+        for path in output_files:
+            print(f"exists, skip: {path}")
+        return
+
+    page_size = max(1, min(100, args.hf_page_size))
+    print(f"annotation source: Hugging Face {args.hf_dataset}")
+    print("The HF dataset stores labels/metadata in rows, so this step generates Diving48 JSON files.")
+
+    all_records: list[dict[str, Any]] = []
+    for split, filename in [("train", "Diving48_V2_train.json"), ("test", "Diving48_V2_test.json")]:
+        first_page = fetch_hf_rows(args, split, 0, page_size)
+        total = int(first_page["num_rows_total"])
+        records = [convert_hf_record(item["row"]) for item in first_page["rows"]]
+        print(f"{split}: total={total}, page_size={page_size}")
+        next_progress = max(page_size, 1000)
+        for offset in range(page_size, total, page_size):
+            data = fetch_hf_rows(args, split, offset, min(page_size, total - offset))
+            records.extend(convert_hf_record(item["row"]) for item in data["rows"])
+            if len(records) >= next_progress or len(records) == total:
+                print(f"  {split}: fetched {min(len(records), total)}/{total}")
+                next_progress += 1000
+
+        if len(records) != total:
+            raise RuntimeError(f"{split}: expected {total} records, got {len(records)}")
+        out_path = annotation_dir / filename
+        write_json_atomic(out_path, records)
+        all_records.extend(records)
+        print(f"wrote {out_path}")
+
+    vocab_by_label: dict[int, str] = {}
+    for record in all_records:
+        label = int(record["label"])
+        vocab_by_label.setdefault(label, str(record["label_name"]))
+    missing = sorted(set(range(48)) - set(vocab_by_label))
+    if missing:
+        raise RuntimeError(f"missing label names for labels: {missing}")
+    vocab = {vocab_by_label[label]: label for label in range(48)}
+    vocab_path = annotation_dir / "Diving48_vocab.json"
+    write_json_atomic(vocab_path, vocab)
+    print(f"wrote {vocab_path}")
+
+
 def annotation_failure_message(error: Exception, annotation_dir: Path) -> str:
     return f"""
-Could not download Diving48 V2 annotations from the official UCSD URL.
+Could not prepare Diving48 V2 annotations.
 
 Reason:
   {error}
 
-This is currently an upstream access problem: the UCSD annotation URLs may
-return HTTP 403 from cloud machines. The RunPod CUDA/model environment is still OK.
+The RunPod CUDA/model environment may still be OK. The default annotation
+source is Hugging Face row metadata. The legacy UCSD annotation URLs may return
+HTTP 403 from cloud machines.
 
 To continue, use one of these options:
 
-Option A: use OpenDataLab/MMAction2 downloader on RunPod
+Option A: retry the Hugging Face metadata source
+  python scripts/download_diving48_v2.py --dataset-root <DATASET_ROOT> --skip-videos
+
+Option B: use OpenDataLab/MMAction2 downloader on RunPod
   pip install -U openmim opendatalab
   odl login
   mim download mmaction2 --dataset diving48
@@ -113,21 +245,24 @@ Then copy or symlink these files into:
   {annotation_dir}/Diving48_V2_test.json
   {annotation_dir}/Diving48_vocab.json
 
-Option B: upload the annotation files from your local machine:
+Option C: upload the annotation files from your local machine:
   scp -P <PORT> Diving48_V2_train.json root@<RUNPOD_HOST>:{annotation_dir}/
   scp -P <PORT> Diving48_V2_test.json  root@<RUNPOD_HOST>:{annotation_dir}/
   scp -P <PORT> Diving48_vocab.json    root@<RUNPOD_HOST>:{annotation_dir}/
 
-Option C: if you already have CLIP embeddings, skip dataset download and run:
+Option D: if you already have CLIP embeddings, skip dataset download and run:
   python scripts/runpod_small_start.py --mode real --embeddings-path /workspace/data/diving48_embeddings/train_embeddings.pt --samples-per-class 2 --epochs 3 --batch-size 16 --variants all
 """
 
 
 def download_annotations(args: argparse.Namespace, annotation_dir: Path) -> None:
     try:
-        download_file(args.train_url, annotation_dir / "Diving48_V2_train.json", args.force)
-        download_file(args.test_url, annotation_dir / "Diving48_V2_test.json", args.force)
-        download_file(args.vocab_url, annotation_dir / "Diving48_vocab.json", args.force)
+        if args.annotation_source == "hf":
+            download_hf_annotations(args, annotation_dir)
+        else:
+            download_file(args.train_url, annotation_dir / "Diving48_V2_train.json", args.force)
+            download_file(args.test_url, annotation_dir / "Diving48_V2_test.json", args.force)
+            download_file(args.vocab_url, annotation_dir / "Diving48_vocab.json", args.force)
     except RuntimeError as exc:
         message = annotation_failure_message(exc, annotation_dir)
         (annotation_dir / "DOWNLOAD_FAILED.txt").write_text(message, encoding="utf-8")
