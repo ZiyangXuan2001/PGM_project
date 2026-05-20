@@ -63,6 +63,7 @@ def check_split(
     labels = payload.get("labels")
     label_names = payload.get("label_names", [])
     metadata = payload.get("metadata", [])
+    backbone_name = payload.get("backbone_name")
 
     print(f"\n{split}: {path}")
     if not isinstance(X, torch.Tensor):
@@ -85,6 +86,8 @@ def check_split(
     assert isinstance(labels, torch.Tensor)
     print(f"  X shape: {tuple(X.shape)}")
     print(f"  labels shape: {tuple(labels.shape)}")
+    if backbone_name:
+        print(f"  backbone_name: {backbone_name}")
 
     if X.ndim != 3:
         errors.append(f"X must have shape [N, T, D], got {tuple(X.shape)}")

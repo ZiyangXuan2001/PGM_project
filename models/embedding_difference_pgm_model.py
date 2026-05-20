@@ -19,10 +19,12 @@ from .pairwise_diff_net import PairwiseDiffNet
 
 SUPPORTED_BACKBONES = {
     "precomputed_clip_vit_b16",
+    "precomputed_resnet50",
     # Future documentation-only options. Feature extraction is not implemented here.
     "dinov2_s14_frame",
     "clip_vit_b32_frame",
     "clip_vit_b16_frame",
+    "resnet50_frame",
 }
 
 
@@ -120,10 +122,10 @@ class EmbeddingDifferencePGMModel(nn.Module):
         if backbone_name not in SUPPORTED_BACKBONES:
             valid = ", ".join(sorted(SUPPORTED_BACKBONES))
             raise ValueError(f"unsupported backbone {backbone_name!r}; valid options: {valid}")
-        if backbone_name != "precomputed_clip_vit_b16":
+        if backbone_name not in {"precomputed_clip_vit_b16", "precomputed_resnet50"}:
             raise NotImplementedError(
                 f"{backbone_name} is documented as a future backbone option; "
-                "only precomputed_clip_vit_b16 inputs are implemented now."
+                "only precomputed frame inputs are implemented now."
             )
         if pgm_type not in {"none", "gaussian_chain", "learnable_gaussian_chain"}:
             raise ValueError(

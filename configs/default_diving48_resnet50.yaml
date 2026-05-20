@@ -7,14 +7,9 @@ model:
   variant: diff_pgm_info_attention
 
 backbone:
-  name: precomputed_clip_vit_b16
-  input_dim: 512
+  name: precomputed_resnet50
+  input_dim: 2048
   num_frames: 16
-  future_options:
-    - dinov2_s14_frame
-    - clip_vit_b32_frame
-    - clip_vit_b16_frame
-    - resnet50_frame
 
 diff_nn:
   type: pairwise_diff_net

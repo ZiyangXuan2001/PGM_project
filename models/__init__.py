@@ -11,6 +11,7 @@ from .embedding_difference_pgm_model import CLIPMeanPoolBaseline, EmbeddingDiffe
 from .gaussian_pgm_smoother import GaussianPGMSmoother
 from .information_matrix_accumulator import InformationMatrixAccumulator
 from .pairwise_diff_net import PairwiseDiffNet
+from .resnet_frame_encoder import ResNetFrameEncoder
 
 __all__ = [
     "CLIPFrameEncoder",
@@ -23,5 +24,5 @@ __all__ = [
     "MLPClassifier",
     "CLIPMeanPoolBaseline",
     "EmbeddingDifferencePGMModel",
+    "ResNetFrameEncoder",
 ]
-

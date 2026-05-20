@@ -27,6 +27,8 @@ DEFAULT_DATASET_ROOT = PROJECT_ROOT / "data" / "diving48_v2"
 CLIP_IMAGE_SIZE = 224
 CLIP_MEAN = torch.tensor([0.48145466, 0.4578275, 0.40821073]).view(3, 1, 1)
 CLIP_STD = torch.tensor([0.26862954, 0.26130258, 0.27577711]).view(3, 1, 1)
+IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
 RESAMPLE_BICUBIC = getattr(Image, "Resampling", Image).BICUBIC
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 VIDEO_EXTENSIONS = [".mp4", ".avi", ".mkv", ".mov", ".webm"]
@@ -167,26 +169,62 @@ def stratified_train_val_split(
     return train_records, val_records
 
 
-def preprocess_pil_image(image: Image.Image) -> torch.Tensor:
+def preprocessing_stats(backbone_name: str) -> tuple[int, torch.Tensor, torch.Tensor]:
+    if backbone_name == "resnet50":
+        return 224, IMAGENET_MEAN, IMAGENET_STD
+    return CLIP_IMAGE_SIZE, CLIP_MEAN, CLIP_STD
+
+
+def preprocess_pil_image(
+    image: Image.Image,
+    image_size: int,
+    mean: torch.Tensor,
+    std: torch.Tensor,
+) -> torch.Tensor:
     image = image.convert("RGB")
-    if image.size != (CLIP_IMAGE_SIZE, CLIP_IMAGE_SIZE):
-        image = image.resize((CLIP_IMAGE_SIZE, CLIP_IMAGE_SIZE), RESAMPLE_BICUBIC)
+    if image.size != (image_size, image_size):
+        image = image.resize((image_size, image_size), RESAMPLE_BICUBIC)
     image_bytes = image.tobytes()
     tensor = torch.frombuffer(image_bytes, dtype=torch.uint8).clone()
-    tensor = tensor.view(CLIP_IMAGE_SIZE, CLIP_IMAGE_SIZE, 3).permute(2, 0, 1)
+    tensor = tensor.view(image_size, image_size, 3).permute(2, 0, 1)
     tensor = tensor.float().div(255.0)
-    return (tensor - CLIP_MEAN) / CLIP_STD
+    return (tensor - mean) / std
 
 
-def preprocess_image_path(path: Path) -> torch.Tensor:
+def preprocess_image_path(
+    path: Path,
+    image_size: int,
+    mean: torch.Tensor,
+    std: torch.Tensor,
+) -> torch.Tensor:
     with Image.open(path) as image:
-        return preprocess_pil_image(image)
+        return preprocess_pil_image(image, image_size=image_size, mean=mean, std=std)
 
 
 def load_encoder(
     device: torch.device,
     backbone_name: str,
 ) -> tuple[Callable[[torch.Tensor], torch.Tensor], str]:
+    if backbone_name == "resnet50":
+        try:
+            from models import ResNetFrameEncoder
+
+            encoder = ResNetFrameEncoder(
+                backbone_name=backbone_name,
+                freeze=True,
+                normalize=True,
+                device=device,
+            )
+            encoder.eval()
+
+            def encode_with_resnet(frames: torch.Tensor) -> torch.Tensor:
+                with torch.no_grad():
+                    return encoder(frames.unsqueeze(1)).squeeze(1).detach().cpu()
+
+            return encode_with_resnet, "models.ResNetFrameEncoder(resnet50)"
+        except ImportError:
+            raise
+
     try:
         from models import CLIPFrameEncoder
 
@@ -263,13 +301,22 @@ def load_rawframes(
     record: dict[str, Any],
     rawframes_dir: Path,
     num_frames: int,
+    image_size: int,
+    mean: torch.Tensor,
+    std: torch.Tensor,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     frame_paths = rawframe_paths_for(record, rawframes_dir)
     if not frame_paths:
         raise FileNotFoundError(f"missing rawframes for {record['vid_name']} under {rawframes_dir}")
     indices = uniform_indices(len(frame_paths), num_frames)
     sampled_paths = [frame_paths[idx] for idx in indices]
-    frames = torch.stack([preprocess_image_path(path) for path in sampled_paths], dim=0)
+    frames = torch.stack(
+        [
+            preprocess_image_path(path, image_size=image_size, mean=mean, std=std)
+            for path in sampled_paths
+        ],
+        dim=0,
+    )
     metadata = {
         "source_type": "rawframes",
         "source_path": str(rawframes_dir / str(record["vid_name"])),
@@ -284,6 +331,9 @@ def load_video_frames(
     record: dict[str, Any],
     video_dir: Path,
     num_frames: int,
+    image_size: int,
+    mean: torch.Tensor,
+    std: torch.Tensor,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     video_path = video_path_for(record, video_dir)
     if video_path is None:
@@ -312,7 +362,14 @@ def load_video_frames(
             if not ok or frame_bgr is None:
                 raise ValueError(f"failed to read frame {frame_idx} from {video_path}")
             frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-            frames.append(preprocess_pil_image(Image.fromarray(frame_rgb)))
+            frames.append(
+                preprocess_pil_image(
+                    Image.fromarray(frame_rgb),
+                    image_size=image_size,
+                    mean=mean,
+                    std=std,
+                )
+            )
     finally:
         capture.release()
 
@@ -331,15 +388,32 @@ def load_sequence_frames(
     video_dir: Path,
     rawframes_dir: Path,
     num_frames: int,
+    image_size: int,
+    mean: torch.Tensor,
+    std: torch.Tensor,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     if input_format in {"auto", "rawframes"}:
         try:
-            return load_rawframes(record, rawframes_dir, num_frames)
+            return load_rawframes(
+                record,
+                rawframes_dir,
+                num_frames,
+                image_size=image_size,
+                mean=mean,
+                std=std,
+            )
         except FileNotFoundError:
             if input_format == "rawframes":
                 raise
 
-    return load_video_frames(record, video_dir, num_frames)
+    return load_video_frames(
+        record,
+        video_dir,
+        num_frames,
+        image_size=image_size,
+        mean=mean,
+        std=std,
+    )
 
 
 def encode_sequence(
@@ -383,6 +457,7 @@ def process_split(
     rawframes_dir: Path,
     out_dir: Path,
     encode_batch: Callable[[torch.Tensor], torch.Tensor],
+    backbone_name: str,
     num_frames: int,
     batch_size: int,
     max_samples: int | None,
@@ -396,6 +471,7 @@ def process_split(
     labels: list[int] = []
     metadata: list[dict[str, Any]] = []
     embedding_dim: int | None = None
+    image_size, mean, std = preprocessing_stats(backbone_name)
     for idx, record in enumerate(records, start=1):
         frames, frame_metadata = load_sequence_frames(
             record=record,
@@ -403,6 +479,9 @@ def process_split(
             video_dir=video_dir,
             rawframes_dir=rawframes_dir,
             num_frames=num_frames,
+            image_size=image_size,
+            mean=mean,
+            std=std,
         )
         sequence_embeddings = encode_sequence(frames, encode_batch, batch_size)
         if sequence_embeddings.ndim != 2 or sequence_embeddings.shape[0] != num_frames:
@@ -439,6 +518,9 @@ def process_split(
         "labels": labels_tensor,
         "label_names": label_names,
         "metadata": metadata,
+        "backbone_name": backbone_name,
+        "embedding_dim": int(X.shape[-1]),
+        "num_frames": int(X.shape[1]),
     }
     out_path = out_dir / f"{split}.pt"
     torch.save(payload, out_path)
@@ -480,7 +562,6 @@ def main() -> None:
         encode_batch, encoder_name = load_encoder(device, args.backbone_name)
     except ImportError as exc:
         print(exc)
-        print("pip install git+https://github.com/openai/CLIP.git")
         raise SystemExit(1) from exc
 
     print(f"Using {encoder_name} on {device}.")
@@ -501,6 +582,7 @@ def main() -> None:
             rawframes_dir=rawframes_dir,
             out_dir=out_dir,
             encode_batch=encode_batch,
+            backbone_name=args.backbone_name,
             num_frames=args.num_frames,
             batch_size=args.batch_size,
             max_samples=args.max_samples_per_split,

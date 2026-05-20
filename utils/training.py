@@ -307,6 +307,9 @@ def train_from_config(
 
     D = int(train_payload["X"].shape[-1])
     config.setdefault("backbone", {})["input_dim"] = D
+    payload_backbone = train_payload.get("backbone_name")
+    if isinstance(payload_backbone, str) and payload_backbone == "resnet50":
+        config["backbone"]["name"] = "precomputed_resnet50"
     if val_payload["X"].shape[-1] != D:
         raise ValueError(f"train D={D} but val D={val_payload['X'].shape[-1]}")
 

@@ -188,8 +188,6 @@ def load_real_embeddings(path: Path) -> dict[str, Any]:
         labels = labels.reshape(-1)
     if X.shape[0] != labels.shape[0]:
         raise ValueError(f"{path} embeddings and labels disagree on N: {X.shape[0]} vs {labels.shape[0]}")
-    if X.shape[-1] != 512:
-        raise ValueError(f"{path} expected embedding dim 512, got {X.shape[-1]}.")
     if not torch.isfinite(X).all():
         raise FloatingPointError(f"{path} embeddings contain NaN or Inf values.")
 
@@ -203,6 +201,8 @@ def load_real_embeddings(path: Path) -> dict[str, Any]:
         "labels": labels.long(),
         "label_names": label_names,
         "metadata": metadata,
+        "backbone_name": payload.get("backbone_name") if isinstance(payload, dict) else None,
+        "embedding_dim": int(X.shape[-1]),
     }
 
 
@@ -277,6 +277,8 @@ def subset_by_indices(payload: dict[str, Any], indices: torch.Tensor) -> dict[st
         "metadata": [copy.deepcopy(payload.get("metadata", [])[index]) for index in index_list]
         if payload.get("metadata")
         else [{"index": index} for index in index_list],
+        "backbone_name": payload.get("backbone_name"),
+        "embedding_dim": int(payload["X"].shape[-1]),
     }
 
 
