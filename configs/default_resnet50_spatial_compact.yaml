@@ -1,0 +1,54 @@
+dataset:
+  name: diving48_v2
+  num_classes: 48
+
+model:
+  ablation_id: E4
+  variant: diff_pgm_info_attention
+
+backbone:
+  name: precomputed_resnet50_layer4
+  input_dim: 2048
+  num_frames: 16
+  feature_format: spatial_map
+  spatial_tokens: 49
+  spatial_token_dim: 64
+
+diff_nn:
+  type: pairwise_diff_net
+  d_y: 64
+  hidden_dim: 128
+  dropout: 0.1
+
+pgm_smoother:
+  type: gaussian_chain
+  lambda_smooth: 1.0
+
+information_matrix:
+  enabled: true
+  type: accumulator
+  K: 8
+  d_h: 64
+  use_alpha: true
+  eta: 1.0
+
+classifier:
+  type: attention_pool
+  hidden_dim: 128
+  dropout: 0.2
+  num_heads: 4
+
+training:
+  batch_size: 64
+  lr: 5e-5
+  weight_decay: 1e-3
+  epochs: 50
+  device: auto
+  seed: 0
+  save_best: true
+
+logging:
+  use_wandb: false
+  wandb_project: diving48-diff-pgm-info
+
+notes: "Compact spatial-token ResNet50 layer4 model: input [B,T,49,2048], projection 2048->64, token-wise DiffNN, mean over spatial evidence, PGM + information matrix."

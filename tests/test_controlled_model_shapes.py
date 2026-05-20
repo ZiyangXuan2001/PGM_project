@@ -78,6 +78,23 @@ class ControlledModelShapeTests(unittest.TestCase):
                     self.assertEqual(tuple(debug["Y"].shape), (self.B, self.T - 1, 128))
                     self.assertEqual(tuple(debug["H_final"].shape), (self.B, 8, 128))
 
+    def test_spatial_map_e3_e4_logits_shape(self) -> None:
+        spatial_config = load_config(str(PROJECT_ROOT / "configs" / "default_resnet50_spatial_compact.yaml"))
+        X = torch.randn(self.B, self.T, 49, 2048)
+        for ablation_id, variant in [("E3", "diff_pgm_info"), ("E4", "diff_pgm_info_attention")]:
+            with self.subTest(ablation_id=ablation_id, variant=variant):
+                config = deepcopy(spatial_config)
+                config["model"]["ablation_id"] = ablation_id
+                config["model"]["variant"] = variant
+                config["classifier"]["type"] = "attention_pool" if ablation_id == "E4" else "mlp"
+                model = EmbeddingDifferencePGMModel.from_config(config)
+                debug = model(X, return_debug=True)
+                self.assertEqual(tuple(debug["logits"].shape), (self.B, 48))
+                self.assertEqual(tuple(debug["R"].shape), (self.B, self.T - 1, 64))
+                self.assertEqual(tuple(debug["Y"].shape), (self.B, self.T - 1, 64))
+                self.assertEqual(tuple(debug["H_final"].shape), (self.B, 8, 64))
+                self.assertEqual(tuple(debug["R_tokens"].shape), (self.B, self.T - 1, 49, 64))
+
     def test_experiment_manager_file_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = self.make_config("E4", "diff_pgm_info_attention")

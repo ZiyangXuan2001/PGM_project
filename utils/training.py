@@ -112,8 +112,8 @@ def load_embedding_payload(path: Path) -> dict[str, Any]:
 
     X = payload["X"]
     labels = payload["labels"]
-    if not isinstance(X, torch.Tensor) or X.ndim != 3:
-        raise ValueError(f"{path} X must be a tensor with shape [N, T, D]")
+    if not isinstance(X, torch.Tensor) or X.ndim not in {3, 4}:
+        raise ValueError(f"{path} X must be a tensor with shape [N, T, D] or [N, T, S, D]")
     if not isinstance(labels, torch.Tensor) or labels.ndim != 1:
         raise ValueError(f"{path} labels must be a tensor with shape [N]")
     if X.shape[0] != labels.shape[0]:
@@ -308,10 +308,24 @@ def train_from_config(
     D = int(train_payload["X"].shape[-1])
     config.setdefault("backbone", {})["input_dim"] = D
     payload_backbone = train_payload.get("backbone_name")
+    payload_format = train_payload.get("feature_format")
     if isinstance(payload_backbone, str) and payload_backbone == "resnet50":
-        config["backbone"]["name"] = "precomputed_resnet50"
+        if payload_format == "spatial_map":
+            config["backbone"]["name"] = "precomputed_resnet50_layer4"
+            config["backbone"]["feature_format"] = "spatial_map"
+            config["backbone"]["spatial_tokens"] = int(train_payload["X"].shape[2])
+        else:
+            config["backbone"]["name"] = "precomputed_resnet50"
+            config["backbone"]["feature_format"] = "vector"
+    elif train_payload["X"].ndim == 4:
+        config["backbone"]["feature_format"] = "spatial_map"
+        config["backbone"]["spatial_tokens"] = int(train_payload["X"].shape[2])
     if val_payload["X"].shape[-1] != D:
         raise ValueError(f"train D={D} but val D={val_payload['X'].shape[-1]}")
+    if train_payload["X"].ndim != val_payload["X"].ndim:
+        raise ValueError(f"train X ndim={train_payload['X'].ndim} but val X ndim={val_payload['X'].ndim}")
+    if train_payload["X"].ndim == 4 and train_payload["X"].shape[2] != val_payload["X"].shape[2]:
+        raise ValueError(f"train spatial tokens={train_payload['X'].shape[2]} but val has {val_payload['X'].shape[2]}")
 
     if run_dir is not None:
         config.setdefault("output", {})["run_dir"] = str(run_dir)

@@ -20,6 +20,7 @@ from .pairwise_diff_net import PairwiseDiffNet
 SUPPORTED_BACKBONES = {
     "precomputed_clip_vit_b16",
     "precomputed_resnet50",
+    "precomputed_resnet50_layer4",
     # Future documentation-only options. Feature extraction is not implemented here.
     "dinov2_s14_frame",
     "clip_vit_b32_frame",
@@ -106,6 +107,9 @@ class EmbeddingDifferencePGMModel(nn.Module):
         classifier_dropout: float = 0.2,
         attention_heads: int = 4,
         backbone_name: str = "precomputed_clip_vit_b16",
+        feature_format: str = "vector",
+        spatial_tokens: int = 49,
+        spatial_token_dim: int = 64,
         model_variant: str = "diff_pgm_info_attention",
         ablation_id: str = "E4",
     ) -> None:
@@ -122,11 +126,15 @@ class EmbeddingDifferencePGMModel(nn.Module):
         if backbone_name not in SUPPORTED_BACKBONES:
             valid = ", ".join(sorted(SUPPORTED_BACKBONES))
             raise ValueError(f"unsupported backbone {backbone_name!r}; valid options: {valid}")
-        if backbone_name not in {"precomputed_clip_vit_b16", "precomputed_resnet50"}:
+        if backbone_name not in {"precomputed_clip_vit_b16", "precomputed_resnet50", "precomputed_resnet50_layer4"}:
             raise NotImplementedError(
                 f"{backbone_name} is documented as a future backbone option; "
                 "only precomputed frame inputs are implemented now."
             )
+        if feature_format not in {"vector", "spatial_map"}:
+            raise ValueError(f"feature_format must be 'vector' or 'spatial_map', got {feature_format!r}")
+        if feature_format == "spatial_map" and spatial_tokens <= 0:
+            raise ValueError("spatial_tokens must be positive for spatial_map inputs")
         if pgm_type not in {"none", "gaussian_chain", "learnable_gaussian_chain"}:
             raise ValueError(
                 "pgm_smoother.type must be one of: none, gaussian_chain, "
@@ -146,17 +154,30 @@ class EmbeddingDifferencePGMModel(nn.Module):
         self.pgm_type = pgm_type
         self.classifier_type = classifier_type
         self.backbone_name = backbone_name
+        self.feature_format = feature_format
+        self.spatial_tokens = spatial_tokens
+        self.spatial_token_dim = spatial_token_dim
         self.model_variant = model_variant
         self.ablation_id = ablation_id
+        self.pairwise_input_dim = spatial_token_dim if feature_format == "spatial_map" else input_dim
+
+        self.spatial_projector = None
+        if feature_format == "spatial_map":
+            self.spatial_projector = nn.Sequential(
+                nn.Linear(input_dim, spatial_token_dim),
+                nn.GELU(),
+                nn.LayerNorm(spatial_token_dim),
+                nn.Dropout(diff_dropout),
+            )
 
         self.pairwise_diff = PairwiseDiffNet(
-            D=input_dim,
+            D=self.pairwise_input_dim,
             d_y=d_y,
             pair_hidden=pair_hidden,
             dropout=diff_dropout,
         )
         self.baseline_classifier = MLPClassifier(
-            input_dim=input_dim,
+            input_dim=self.pairwise_input_dim,
             num_classes=num_classes,
             hidden_dim=classifier_hidden,
             dropout=classifier_dropout,
@@ -249,24 +270,56 @@ class EmbeddingDifferencePGMModel(nn.Module):
             classifier_dropout=float(classifier_config.get("dropout", 0.2)),
             attention_heads=int(classifier_config.get("num_heads", 4)),
             backbone_name=str(backbone_config.get("name", "precomputed_clip_vit_b16")),
+            feature_format=str(backbone_config.get("feature_format", "vector")),
+            spatial_tokens=int(backbone_config.get("spatial_tokens", 49)),
+            spatial_token_dim=int(backbone_config.get("spatial_token_dim", min(128, int(diff_config.get("d_y", 128))))),
             model_variant=model_variant,
             ablation_id=ablation_id,
         )
 
     def _validate_input(self, X: torch.Tensor) -> None:
-        if X.ndim != 3:
-            raise ValueError(f"X must have shape [B, T, d_x], got {tuple(X.shape)}")
+        if self.feature_format == "vector":
+            if X.ndim != 3:
+                raise ValueError(f"X must have shape [B, T, d_x], got {tuple(X.shape)}")
+            if X.shape[-1] != self.input_dim:
+                raise ValueError(f"expected input_dim={self.input_dim}, got {X.shape[-1]}")
+            if X.shape[1] < 2:
+                raise ValueError("X must contain at least two frames")
+            return
+
+        if X.ndim != 4:
+            raise ValueError(f"spatial_map X must have shape [B, T, S, d_x], got {tuple(X.shape)}")
+        if X.shape[2] != self.spatial_tokens:
+            raise ValueError(f"expected spatial_tokens={self.spatial_tokens}, got {X.shape[2]}")
         if X.shape[-1] != self.input_dim:
             raise ValueError(f"expected input_dim={self.input_dim}, got {X.shape[-1]}")
         if X.shape[1] < 2:
             raise ValueError("X must contain at least two frames")
 
+    def _prepare_frame_sequence(self, X: torch.Tensor) -> torch.Tensor:
+        if self.feature_format == "vector":
+            return X
+        assert self.spatial_projector is not None
+        Z = self.spatial_projector(X)
+        return Z
+
+    def _run_pairwise_diff(self, prepared: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if self.feature_format == "vector":
+            return self.pairwise_diff(prepared), None
+
+        batch_size, num_frames, num_tokens, token_dim = prepared.shape
+        token_sequences = prepared.permute(0, 2, 1, 3).reshape(batch_size * num_tokens, num_frames, token_dim)
+        token_R = self.pairwise_diff(token_sequences)
+        token_R = token_R.reshape(batch_size, num_tokens, num_frames - 1, self.d_y).permute(0, 2, 1, 3)
+        return token_R.mean(dim=2), token_R
+
     def forward(self, X: torch.Tensor, return_debug: bool = False) -> torch.Tensor | dict[str, Any]:
-        """Run the controlled DiffTraj-PGM pipeline on ``X: [B, T, d_x]``."""
+        """Run DiffTraj-PGM on ``[B,T,D]`` vectors or ``[B,T,S,D]`` spatial tokens."""
 
         self._validate_input(X)
+        prepared = self._prepare_frame_sequence(X)
         if self.model_variant == "mean_pool_baseline":
-            pooled = X.mean(dim=1)
+            pooled = prepared.mean(dim=1) if prepared.ndim == 3 else prepared.mean(dim=(1, 2))
             logits = self.baseline_classifier(pooled)
             if return_debug:
                 return {
@@ -280,10 +333,11 @@ class EmbeddingDifferencePGMModel(nn.Module):
                     "ablation_id": self.ablation_id,
                     "model_variant": self.model_variant,
                     "classifier_type": "mlp",
+                    "feature_format": self.feature_format,
                 }
             return logits
 
-        R = self.pairwise_diff(X)
+        R, R_tokens = self._run_pairwise_diff(prepared)
         if self.model_variant in {"diff_only", "diff_pgm"}:
             if self.smoother is None:
                 Y = R
@@ -301,9 +355,11 @@ class EmbeddingDifferencePGMModel(nn.Module):
                     "alpha": None,
                     "lambda_smooth": lambda_smooth,
                     "pooled": pooled,
+                    "R_tokens": R_tokens,
                     "ablation_id": self.ablation_id,
                     "model_variant": self.model_variant,
                     "classifier_type": "mlp",
+                    "feature_format": self.feature_format,
                 }
             return logits
 
@@ -323,9 +379,11 @@ class EmbeddingDifferencePGMModel(nn.Module):
                 "H_final": H_final,
                 "alpha": alpha,
                 "lambda_smooth": lambda_smooth,
+                "R_tokens": R_tokens,
                 "pgm_type": self.pgm_type,
                 "ablation_id": self.ablation_id,
                 "model_variant": self.model_variant,
                 "classifier_type": self.classifier_type,
+                "feature_format": self.feature_format,
             }
         return logits

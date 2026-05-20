@@ -20,6 +20,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--emb_dir", type=Path, default=DEFAULT_EMB_DIR)
     parser.add_argument("--splits", nargs="+", default=["train", "test"])
     parser.add_argument("--expected_T", type=int, default=16)
+    parser.add_argument("--expected_K", type=int, default=None)
     parser.add_argument("--expected_D", type=int, default=512)
     parser.add_argument("--expected_num_classes", type=int, default=48)
     return parser.parse_args()
@@ -49,6 +50,7 @@ def check_split(
     emb_dir: Path,
     split: str,
     expected_T: int,
+    expected_K: int | None,
     expected_D: int,
     expected_num_classes: int,
 ) -> int:
@@ -64,6 +66,7 @@ def check_split(
     label_names = payload.get("label_names", [])
     metadata = payload.get("metadata", [])
     backbone_name = payload.get("backbone_name")
+    feature_format = payload.get("feature_format")
 
     print(f"\n{split}: {path}")
     if not isinstance(X, torch.Tensor):
@@ -88,21 +91,30 @@ def check_split(
     print(f"  labels shape: {tuple(labels.shape)}")
     if backbone_name:
         print(f"  backbone_name: {backbone_name}")
+    if feature_format:
+        print(f"  feature_format: {feature_format}")
 
-    if X.ndim != 3:
-        errors.append(f"X must have shape [N, T, D], got {tuple(X.shape)}")
-    elif X.shape[1:] != (expected_T, expected_D):
-        errors.append(f"expected X shape [N, {expected_T}, {expected_D}], got {tuple(X.shape)}")
+    if X.ndim == 3:
+        if X.shape[1:] != (expected_T, expected_D):
+            errors.append(f"expected X shape [N, {expected_T}, {expected_D}], got {tuple(X.shape)}")
+    elif X.ndim == 4:
+        expected_K = expected_K if expected_K is not None else X.shape[2]
+        if X.shape[1:] != (expected_T, expected_K, expected_D):
+            errors.append(
+                f"expected X shape [N, {expected_T}, {expected_K}, {expected_D}], got {tuple(X.shape)}"
+            )
+    else:
+        errors.append(f"X must have shape [N, T, D] or [N, T, K, D], got {tuple(X.shape)}")
 
     if labels.ndim != 1:
         errors.append(f"labels must have shape [N], got {tuple(labels.shape)}")
-    elif X.ndim == 3 and labels.shape[0] != X.shape[0]:
+    elif X.ndim in {3, 4} and labels.shape[0] != X.shape[0]:
         errors.append(f"labels length {labels.shape[0]} does not match X N={X.shape[0]}")
 
     if len(label_names) != expected_num_classes:
         errors.append(f"expected {expected_num_classes} label names, got {len(label_names)}")
 
-    if X.ndim == 3 and len(metadata) != X.shape[0]:
+    if X.ndim in {3, 4} and len(metadata) != X.shape[0]:
         errors.append(f"metadata length {len(metadata)} does not match X N={X.shape[0]}")
 
     if not torch.isfinite(X).all():
@@ -146,6 +158,7 @@ def main() -> None:
             emb_dir=args.emb_dir,
             split=split,
             expected_T=args.expected_T,
+            expected_K=args.expected_K,
             expected_D=args.expected_D,
             expected_num_classes=args.expected_num_classes,
         )

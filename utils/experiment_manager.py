@@ -58,7 +58,7 @@ ABLATION_INFO: dict[str, dict[str, str]] = {
         "variant": "mean_pool_baseline",
         "purpose": "Basic frozen CLIP frame-embedding baseline with no explicit temporal modeling.",
         "architecture": (
-            "X [B, T, {input_dim}]\n"
+            "X {input_shape}\n"
             "-> mean_pool over T\n"
             "-> MLP classifier\n"
             "-> logits [B, 48]"
@@ -68,7 +68,7 @@ ABLATION_INFO: dict[str, dict[str, str]] = {
         "variant": "diff_only",
         "purpose": "Test whether learned adjacent-frame difference embeddings help.",
         "architecture": (
-            "X [B, T, {input_dim}]\n"
+            "X {input_shape}\n"
             "-> PairwiseDiffNet\n"
             "-> R [B, T-1, d_y]\n"
             "-> mean_pool over time\n"
@@ -80,7 +80,7 @@ ABLATION_INFO: dict[str, dict[str, str]] = {
         "variant": "diff_pgm",
         "purpose": "Test whether Gaussian-chain PGM smoothing improves temporal difference features.",
         "architecture": (
-            "X [B, T, {input_dim}]\n"
+            "X {input_shape}\n"
             "-> PairwiseDiffNet\n"
             "-> R [B, T-1, d_y]\n"
             "-> GaussianPGMSmoother(lambda_smooth = {lambda_smooth})\n"
@@ -94,7 +94,7 @@ ABLATION_INFO: dict[str, dict[str, str]] = {
         "variant": "diff_pgm_info",
         "purpose": "Test whether the information matrix accumulation improves over pooled smoothed temporal features.",
         "architecture": (
-            "X [B, T, {input_dim}]\n"
+            "X {input_shape}\n"
             "-> PairwiseDiffNet\n"
             "-> R [B, T-1, d_y]\n"
             "-> GaussianPGMSmoother(lambda_smooth = {lambda_smooth})\n"
@@ -109,7 +109,7 @@ ABLATION_INFO: dict[str, dict[str, str]] = {
         "variant": "diff_pgm_info_attention",
         "purpose": "Test whether attention pooling over the information matrix improves over simple mean pooling.",
         "architecture": (
-            "X [B, T, {input_dim}]\n"
+            "X {input_shape}\n"
             "-> PairwiseDiffNet\n"
             "-> R [B, T-1, d_y]\n"
             "-> GaussianPGMSmoother(lambda_smooth = {lambda_smooth})\n"
@@ -238,8 +238,14 @@ def save_resolved_config(config: dict[str, Any], run_dir: Path) -> None:
 def architecture_text(config: dict[str, Any]) -> str:
     ablation_id = get_ablation_id(config)
     info = ABLATION_INFO[ablation_id]
+    backbone_config = config.get("backbone", {})
+    input_dim = backbone_config.get("input_dim", 512)
+    if backbone_config.get("feature_format") == "spatial_map":
+        input_shape = f"[B, T, {backbone_config.get('spatial_tokens', 49)}, {input_dim}]"
+    else:
+        input_shape = f"[B, T, {input_dim}]"
     return info["architecture"].format(
-        input_dim=config.get("backbone", {}).get("input_dim", 512),
+        input_shape=input_shape,
         lambda_smooth=config.get("pgm_smoother", {}).get("lambda_smooth", "none"),
         K=config.get("information_matrix", {}).get("K", 8),
         d_h=config.get("information_matrix", {}).get("d_h", 128),
@@ -255,13 +261,17 @@ def write_model_summary(config: dict[str, Any], run_dir: Path) -> None:
     num_frames = config.get("backbone", {}).get("num_frames", 16)
     input_dim = config.get("backbone", {}).get("input_dim", 512)
     backbone = config.get("backbone", {}).get("name", "precomputed_clip_vit_b16")
+    if config.get("backbone", {}).get("feature_format") == "spatial_map":
+        input_shape = f"X [B, {num_frames}, {config.get('backbone', {}).get('spatial_tokens', 49)}, {input_dim}]"
+    else:
+        input_shape = f"X [B, {num_frames}, {input_dim}]"
     lines = [
         f"Run name: {config.get('output', {}).get('run_name', '')}",
         f"Ablation ID: {ablation_id}",
         f"Model variant: {variant}",
         f"Dataset: {dataset}",
         f"Input type: {backbone} frame embeddings",
-        f"Input shape: X [B, {num_frames}, {input_dim}]",
+        f"Input shape: {input_shape}",
         f"Number of classes: {num_classes}",
         "",
         "Architecture:",

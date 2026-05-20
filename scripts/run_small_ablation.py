@@ -180,8 +180,8 @@ def load_real_embeddings(path: Path) -> dict[str, Any]:
             "or a list of {'embedding', 'label', 'video_id'} dicts."
         )
 
-    if not isinstance(X, torch.Tensor) or X.ndim != 3:
-        raise ValueError(f"{path} embeddings must be a tensor with shape [N, T, 512].")
+    if not isinstance(X, torch.Tensor) or X.ndim not in {3, 4}:
+        raise ValueError(f"{path} embeddings must be a tensor with shape [N, T, D] or [N, T, S, D].")
     if not isinstance(labels, torch.Tensor):
         labels = torch.tensor(labels, dtype=torch.long)
     if labels.ndim != 1:
@@ -202,6 +202,7 @@ def load_real_embeddings(path: Path) -> dict[str, Any]:
         "label_names": label_names,
         "metadata": metadata,
         "backbone_name": payload.get("backbone_name") if isinstance(payload, dict) else None,
+        "feature_format": payload.get("feature_format") if isinstance(payload, dict) else None,
         "embedding_dim": int(X.shape[-1]),
     }
 
@@ -212,13 +213,19 @@ def make_fake_payload(config: dict[str, Any], max_samples: int, seed: int) -> di
     num_frames = int(config.get("backbone", {}).get("num_frames", 16))
     input_dim = int(config.get("backbone", {}).get("input_dim", 512))
     num_classes = int(config.get("dataset", {}).get("num_classes", 48))
-    X = torch.randn(max_samples, num_frames, input_dim, generator=generator)
+    if config.get("backbone", {}).get("feature_format") == "spatial_map":
+        spatial_tokens = int(config.get("backbone", {}).get("spatial_tokens", 49))
+        X = torch.randn(max_samples, num_frames, spatial_tokens, input_dim, generator=generator)
+    else:
+        X = torch.randn(max_samples, num_frames, input_dim, generator=generator)
     labels = torch.randint(0, num_classes, (max_samples,), generator=generator)
     return {
         "X": X,
         "labels": labels,
         "label_names": [str(index) for index in range(num_classes)],
         "metadata": [{"source": "fake", "index": index} for index in range(max_samples)],
+        "feature_format": config.get("backbone", {}).get("feature_format", "vector"),
+        "embedding_dim": input_dim,
     }
 
 
@@ -278,6 +285,7 @@ def subset_by_indices(payload: dict[str, Any], indices: torch.Tensor) -> dict[st
         if payload.get("metadata")
         else [{"index": index} for index in index_list],
         "backbone_name": payload.get("backbone_name"),
+        "feature_format": payload.get("feature_format"),
         "embedding_dim": int(payload["X"].shape[-1]),
     }
 

@@ -36,7 +36,7 @@ FALLBACK_LABEL_NAMES = [f"class_{idx:02d}" for idx in range(48)]
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Extract CLIP embeddings for Diving48 V2.")
+    parser = argparse.ArgumentParser(description="Extract frame features for Diving48 V2.")
     parser.add_argument("--dataset_root", type=Path, default=DEFAULT_DATASET_ROOT)
     parser.add_argument("--annotation_dir", type=Path, default=None)
     parser.add_argument("--video_dir", type=Path, default=None)
@@ -51,6 +51,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max_samples_per_split", type=int, default=None)
     parser.add_argument("--backbone_name", default="ViT-B/16")
+    parser.add_argument(
+        "--feature_format",
+        choices=["pooled", "spatial_map"],
+        default="pooled",
+        help="For resnet50, save global pooled [T,2048] or layer4 spatial tokens [T,49,2048].",
+    )
+    parser.add_argument(
+        "--save_dtype",
+        choices=["fp32", "fp16"],
+        default="fp32",
+        help="Dtype used when saving features. fp16 is useful for large spatial-token files.",
+    )
     parser.add_argument("--embedding_subdir", default="clip_vit_b16")
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda", "mps"])
     parser.add_argument("--batch_size", type=int, default=64)
@@ -204,6 +216,7 @@ def preprocess_image_path(
 def load_encoder(
     device: torch.device,
     backbone_name: str,
+    feature_format: str,
 ) -> tuple[Callable[[torch.Tensor], torch.Tensor], str]:
     if backbone_name == "resnet50":
         try:
@@ -213,6 +226,7 @@ def load_encoder(
                 backbone_name=backbone_name,
                 freeze=True,
                 normalize=True,
+                output=feature_format,
                 device=device,
             )
             encoder.eval()
@@ -221,9 +235,12 @@ def load_encoder(
                 with torch.no_grad():
                     return encoder(frames.unsqueeze(1)).squeeze(1).detach().cpu()
 
-            return encode_with_resnet, "models.ResNetFrameEncoder(resnet50)"
+            return encode_with_resnet, f"models.ResNetFrameEncoder(resnet50, output={feature_format})"
         except ImportError:
             raise
+
+    if feature_format != "pooled":
+        raise ValueError("--feature_format spatial_map is currently supported only for --backbone_name resnet50")
 
     try:
         from models import CLIPFrameEncoder
@@ -458,6 +475,8 @@ def process_split(
     out_dir: Path,
     encode_batch: Callable[[torch.Tensor], torch.Tensor],
     backbone_name: str,
+    feature_format: str,
+    save_dtype: str,
     num_frames: int,
     batch_size: int,
     max_samples: int | None,
@@ -471,6 +490,7 @@ def process_split(
     labels: list[int] = []
     metadata: list[dict[str, Any]] = []
     embedding_dim: int | None = None
+    spatial_tokens: int | None = None
     image_size, mean, std = preprocessing_stats(backbone_name)
     for idx, record in enumerate(records, start=1):
         frames, frame_metadata = load_sequence_frames(
@@ -484,12 +504,13 @@ def process_split(
             std=std,
         )
         sequence_embeddings = encode_sequence(frames, encode_batch, batch_size)
-        if sequence_embeddings.ndim != 2 or sequence_embeddings.shape[0] != num_frames:
+        if sequence_embeddings.ndim not in {2, 3} or sequence_embeddings.shape[0] != num_frames:
             raise ValueError(
-                f"expected {record['vid_name']} embeddings [{num_frames}, D], "
+                f"expected {record['vid_name']} embeddings [{num_frames}, D] or [{num_frames}, K, D], "
                 f"got {tuple(sequence_embeddings.shape)}"
             )
         current_dim = int(sequence_embeddings.shape[-1])
+        current_tokens = int(sequence_embeddings.shape[1]) if sequence_embeddings.ndim == 3 else None
         if embedding_dim is None:
             embedding_dim = current_dim
         elif current_dim != embedding_dim:
@@ -497,6 +518,15 @@ def process_split(
                 f"mixed embedding dims in {split}: first D={embedding_dim}, "
                 f"{record['vid_name']} D={current_dim}"
             )
+        if spatial_tokens is None:
+            spatial_tokens = current_tokens
+        elif current_tokens != spatial_tokens:
+            raise ValueError(
+                f"mixed spatial token counts in {split}: first K={spatial_tokens}, "
+                f"{record['vid_name']} K={current_tokens}"
+            )
+        if save_dtype == "fp16":
+            sequence_embeddings = sequence_embeddings.half()
         embeddings.append(sequence_embeddings)
         labels.append(int(record["label"]))
         metadata.append(
@@ -519,8 +549,11 @@ def process_split(
         "label_names": label_names,
         "metadata": metadata,
         "backbone_name": backbone_name,
+        "feature_format": feature_format,
         "embedding_dim": int(X.shape[-1]),
         "num_frames": int(X.shape[1]),
+        "spatial_tokens": spatial_tokens,
+        "feature_shape": list(X.shape[1:]),
     }
     out_path = out_dir / f"{split}.pt"
     torch.save(payload, out_path)
@@ -559,7 +592,7 @@ def main() -> None:
     label_names = derive_label_names(train_records_all + test_records, annotation_dir / args.vocab_file)
     device = resolve_device(args.device)
     try:
-        encode_batch, encoder_name = load_encoder(device, args.backbone_name)
+        encode_batch, encoder_name = load_encoder(device, args.backbone_name, args.feature_format)
     except ImportError as exc:
         print(exc)
         raise SystemExit(1) from exc
@@ -567,6 +600,8 @@ def main() -> None:
     print(f"Using {encoder_name} on {device}.")
     print(f"dataset_root: {dataset_root}")
     print(f"input_format: {args.input_format}")
+    print(f"feature_format: {args.feature_format}")
+    print(f"save_dtype: {args.save_dtype}")
     print(f"num_frames: {args.num_frames}")
     print(f"out_dir: {out_dir}")
     if not val_records:
@@ -583,6 +618,8 @@ def main() -> None:
             out_dir=out_dir,
             encode_batch=encode_batch,
             backbone_name=args.backbone_name,
+            feature_format=args.feature_format,
+            save_dtype=args.save_dtype,
             num_frames=args.num_frames,
             batch_size=args.batch_size,
             max_samples=args.max_samples_per_split,
