@@ -1,0 +1,43 @@
+dataset:
+  name: diving48_v2
+  num_classes: 48
+model:
+  ablation_id: E4
+  variant: diff_pgm_info_attention
+backbone:
+  name: precomputed_resnet50
+  input_dim: 2048
+  num_frames: 16
+diff_nn:
+  type: pairwise_diff_net
+  d_y: 32
+  hidden_dim: 64
+  dropout: 0.3
+pgm_smoother:
+  type: gaussian_chain
+  lambda_smooth: 1.0
+information_matrix:
+  enabled: true
+  type: accumulator
+  K: 4
+  d_h: 32
+  use_alpha: true
+  eta: 0.5
+classifier:
+  type: attention_pool
+  hidden_dim: 64
+  dropout: 0.4
+  num_heads: 4
+training:
+  batch_size: 64
+  lr: 1.0e-05
+  weight_decay: 0.01
+  epochs: 30
+  device: auto
+  seed: 0
+  save_best: true
+logging:
+  use_wandb: false
+  wandb_project: diving48-diff-pgm-info
+notes: 'Tiny ResNet50 global-feature test: d_y=32, diff hidden=64, K=4, d_h=32, eta=0.5,
+  stronger dropout/weight decay.'

@@ -1,0 +1,47 @@
+dataset:
+  name: diving48_v2
+  num_classes: 48
+model:
+  ablation_id: E4
+  variant: diff_pgm_info_attention
+backbone:
+  name: precomputed_clip_vit_b16
+  input_dim: 512
+  num_frames: 16
+  future_options:
+  - dinov2_s14_frame
+  - clip_vit_b32_frame
+  - clip_vit_b16_frame
+  - resnet50_frame
+diff_nn:
+  type: pairwise_diff_net
+  d_y: 64
+  hidden_dim: 128
+  dropout: 0.1
+pgm_smoother:
+  type: gaussian_chain
+  lambda_smooth: 1.0
+information_matrix:
+  enabled: true
+  type: accumulator
+  K: 8
+  d_h: 64
+  use_alpha: true
+  eta: 1.0
+classifier:
+  type: attention_pool
+  hidden_dim: 128
+  dropout: 0.2
+  num_heads: 4
+training:
+  batch_size: 64
+  lr: 5.0e-05
+  weight_decay: 0.001
+  epochs: 50
+  device: auto
+  seed: 0
+  save_best: true
+logging:
+  use_wandb: false
+  wandb_project: diving48-diff-pgm-info
+notes: 'Compact E3/E4 test: d_y=64, diff hidden=128, K=8, d_h=64, classifier hidden=128.'
