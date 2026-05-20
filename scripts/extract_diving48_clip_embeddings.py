@@ -50,6 +50,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--val_fraction", type=float, default=0.0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max_samples_per_split", type=int, default=None)
+    parser.add_argument(
+        "--sample_start_per_split",
+        type=int,
+        default=0,
+        help=(
+            "Start index within each split before applying --max_samples_per_split. "
+            "Use this for deterministic chunked extraction, e.g. 0 then 2000 then 4000."
+        ),
+    )
     parser.add_argument("--backbone_name", default="ViT-B/16")
     parser.add_argument(
         "--feature_format",
@@ -102,7 +111,9 @@ def load_records(path: Path) -> list[dict[str, Any]]:
             raise ValueError(f"{path}[{idx}] invalid vid_name: {vid_name!r}")
         if not isinstance(label, int) or not 0 <= label < 48:
             raise ValueError(f"{path}[{idx}] invalid label: {label!r}")
-        records.append(record)
+        normalized = dict(record)
+        normalized["_record_index"] = idx
+        records.append(normalized)
     return records
 
 
@@ -447,6 +458,7 @@ def encode_sequence(
 def compact_metadata(
     record: dict[str, Any],
     split: str,
+    split_record_index: int,
     label_names: list[str],
     frame_metadata: dict[str, Any],
     num_frames: int,
@@ -455,6 +467,8 @@ def compact_metadata(
     return {
         "sample_id": str(record["vid_name"]),
         "split": split,
+        "record_index": record.get("_record_index"),
+        "split_record_index": split_record_index,
         "vid_name": str(record["vid_name"]),
         "label": label,
         "label_name": normalize_label_name(record.get("label_name", label_names[label])),
@@ -479,10 +493,22 @@ def process_split(
     save_dtype: str,
     num_frames: int,
     batch_size: int,
+    sample_start: int,
     max_samples: int | None,
 ) -> None:
+    total_records = len(records)
+    if sample_start < 0:
+        raise ValueError("sample_start must be non-negative")
+    if sample_start >= total_records:
+        raise ValueError(f"{split} sample_start={sample_start} is outside {total_records} records")
+
+    selection_stop = total_records if max_samples is None else min(total_records, sample_start + max_samples)
+    records = records[sample_start:selection_stop]
     if max_samples is not None:
-        records = records[:max_samples]
+        print(
+            f"  {split}: selected records [{sample_start}, {selection_stop}) "
+            f"from {total_records} total"
+        )
     if not records:
         raise ValueError(f"{split} contains no samples")
 
@@ -533,6 +559,7 @@ def process_split(
             compact_metadata(
                 record=record,
                 split=split,
+                split_record_index=sample_start + idx - 1,
                 label_names=label_names,
                 frame_metadata=frame_metadata,
                 num_frames=num_frames,
@@ -554,6 +581,10 @@ def process_split(
         "num_frames": int(X.shape[1]),
         "spatial_tokens": spatial_tokens,
         "feature_shape": list(X.shape[1:]),
+        "selection_start": sample_start,
+        "selection_end": selection_stop,
+        "selection_count": len(records),
+        "selection_total_records": total_records,
     }
     out_path = out_dir / f"{split}.pt"
     torch.save(payload, out_path)
@@ -566,6 +597,8 @@ def main() -> None:
         raise SystemExit("num_frames must be positive.")
     if args.batch_size <= 0:
         raise SystemExit("batch_size must be positive.")
+    if args.sample_start_per_split < 0:
+        raise SystemExit("sample_start_per_split must be non-negative.")
     if args.max_samples_per_split is not None and args.max_samples_per_split <= 0:
         raise SystemExit("max_samples_per_split must be positive when provided.")
 
@@ -622,6 +655,7 @@ def main() -> None:
             save_dtype=args.save_dtype,
             num_frames=args.num_frames,
             batch_size=args.batch_size,
+            sample_start=args.sample_start_per_split,
             max_samples=args.max_samples_per_split,
         )
 

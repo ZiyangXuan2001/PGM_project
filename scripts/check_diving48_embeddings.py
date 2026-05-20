@@ -37,6 +37,8 @@ def compact_metadata(record: dict[str, Any]) -> dict[str, Any]:
     return {
         "sample_id": record.get("sample_id"),
         "split": record.get("split"),
+        "record_index": record.get("record_index"),
+        "split_record_index": record.get("split_record_index"),
         "vid_name": record.get("vid_name"),
         "label": record.get("label"),
         "label_name": record.get("label_name"),
@@ -67,6 +69,9 @@ def check_split(
     metadata = payload.get("metadata", [])
     backbone_name = payload.get("backbone_name")
     feature_format = payload.get("feature_format")
+    selection_start = payload.get("selection_start")
+    selection_end = payload.get("selection_end")
+    selection_total_records = payload.get("selection_total_records")
 
     print(f"\n{split}: {path}")
     if not isinstance(X, torch.Tensor):
@@ -93,6 +98,8 @@ def check_split(
         print(f"  backbone_name: {backbone_name}")
     if feature_format:
         print(f"  feature_format: {feature_format}")
+    if selection_start is not None and selection_end is not None:
+        print(f"  selection: [{selection_start}, {selection_end}) / {selection_total_records}")
 
     if X.ndim == 3:
         if X.shape[1:] != (expected_T, expected_D):
