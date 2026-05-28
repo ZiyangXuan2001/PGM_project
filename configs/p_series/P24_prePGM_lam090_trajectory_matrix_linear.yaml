@@ -1,0 +1,57 @@
+metadata:
+  run_id: P24
+  trajectory_head: trajectory_matrix_linear
+  use_pgm: false
+  pgm_lambda: null
+  use_pre_pgm: true
+  pre_pgm_lambda: 0.90
+
+dataset:
+  name: diving48_v2
+  num_classes: 48
+
+model:
+  name: p_series_trajectory_matrix
+  use_pgm: false
+  use_pre_pgm: true
+  clip_dim: 512
+  num_frames: 16
+  d_z: 128
+  d_r: 128
+  num_classes: 48
+
+pre_pgm:
+  alpha: 1.0
+  lambda_frame: 0.90
+
+pgm:
+  alpha: 1.0
+  lambda_frame: 0.0
+
+diffnet:
+  hidden_dim: 256
+  dropout: 0.25
+
+classifier:
+  type: trajectory_matrix_linear
+  dropout: 0.3
+
+training:
+  batch_size: 128
+  lr: 1e-4
+  weight_decay: 1e-3
+  epochs: 120
+  early_stop_patience: 30
+  device: auto
+  seed: 0
+  save_best: true
+  progress_every: 50
+
+output:
+  root: outputs/runs
+
+logging:
+  use_wandb: false
+  wandb_project: diving48-p-series
+
+notes: "P24: prePGM lambda=0.90 before trajectory_matrix_linear; no post-trajectory PGM."

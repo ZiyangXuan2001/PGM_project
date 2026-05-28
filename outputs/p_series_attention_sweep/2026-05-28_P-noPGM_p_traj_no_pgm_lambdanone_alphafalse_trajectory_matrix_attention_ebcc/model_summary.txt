@@ -1,0 +1,23 @@
+Run name: 2026-05-28_P-noPGM_p_traj_no_pgm_lambdanone_alphafalse_trajectory_matrix_attention_ebcc
+Ablation ID: P-noPGM
+Model variant: p_traj_no_pgm
+Dataset: diving48_v2
+Input type: precomputed_clip_vit_b16 frame embeddings
+Input shape: X [B, 16, 512]
+Frame PGM smoother: none
+Frame PGM lambda_smooth: none
+DiffNet type: pairwise_diff_net
+Number of classes: 48
+
+Architecture:
+X [B, T, 512]
+-> TemporalProjection
+-> U [B, T, 128]
+-> ProjectedPairwiseDiffNet
+-> R [B, T-1, 128]
+-> flatten R [B, 1920]
+-> TrajectoryMatrixClassifier
+-> logits [B, 48]
+
+Purpose:
+Projected CLIP trajectory-matrix baseline with no frame PGM.

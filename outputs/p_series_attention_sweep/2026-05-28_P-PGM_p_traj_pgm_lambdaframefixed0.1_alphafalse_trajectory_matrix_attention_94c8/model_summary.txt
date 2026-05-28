@@ -1,0 +1,25 @@
+Run name: 2026-05-28_P-PGM_p_traj_pgm_lambdaframefixed0.1_alphafalse_trajectory_matrix_attention_94c8
+Ablation ID: P-PGM
+Model variant: p_traj_pgm
+Dataset: diving48_v2
+Input type: precomputed_clip_vit_b16 frame embeddings
+Input shape: X [B, 16, 512]
+Frame PGM smoother: post_projected_gaussian_chain
+Frame PGM lambda_smooth: 0.1
+DiffNet type: pairwise_diff_net
+Number of classes: 48
+
+Architecture:
+X [B, T, 512]
+-> TemporalProjection
+-> U [B, T, 128]
+-> GaussianFramePGMSmoother(lambda_frame = 0.1)
+-> Z [B, T, 128]
+-> ProjectedPairwiseDiffNet
+-> R [B, T-1, 128]
+-> flatten R [B, 1920]
+-> TrajectoryMatrixClassifier
+-> logits [B, 48]
+
+Purpose:
+Projected CLIP trajectory-matrix model with only fixed frame-level Gaussian PGM smoothing.

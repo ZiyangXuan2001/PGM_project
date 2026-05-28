@@ -74,17 +74,21 @@ class GaussianPGMSmoother(nn.Module):
         if R.ndim != 3:
             raise ValueError(f"R must have shape [B, L, d_y], got {tuple(R.shape)}")
         length = R.shape[1]
-        lam = self.lambda_smooth.to(device=R.device, dtype=R.dtype)
+        original_dtype = R.dtype
+        solve_dtype = torch.float32 if R.dtype in {torch.float16, torch.bfloat16} else R.dtype
+        R_solve = R.to(dtype=solve_dtype)
+        lam = self.lambda_smooth.to(device=R.device, dtype=solve_dtype)
 
-        identity = torch.eye(length, device=R.device, dtype=R.dtype)
-        laplacian = self._path_laplacian(length, R.device, R.dtype)
+        identity = torch.eye(length, device=R.device, dtype=solve_dtype)
+        laplacian = self._path_laplacian(length, R.device, solve_dtype)
         system = identity + lam * laplacian
 
         # torch.linalg.solve supports batched RHS. Here [L, L] solves [L, B*d_y].
-        rhs = R.permute(1, 0, 2).reshape(length, -1)
+        rhs = R_solve.permute(1, 0, 2).reshape(length, -1)
         solution = torch.linalg.solve(system, rhs)
         Y = solution.reshape(length, R.shape[0], R.shape[2]).permute(1, 0, 2)
+        Y = Y.to(dtype=original_dtype)
 
         if return_lambda:
-            return Y, lam
+            return Y, lam.to(dtype=original_dtype)
         return Y

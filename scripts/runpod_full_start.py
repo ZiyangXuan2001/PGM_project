@@ -27,6 +27,15 @@ from utils.training import prepare_training_config, resolve_device, train_from_c
 
 
 VARIANT_TO_ABLATION = {info["variant"]: ablation_id for ablation_id, info in ABLATION_INFO.items()}
+VARIANT_TO_ABLATION.update(
+    {
+        "mean_pool_baseline": "E0",
+        "diff_only": "E1",
+        "diff_pgm": "E2",
+        "diff_pgm_info": "E3",
+        "diff_pgm_info_attention": "E3",
+    }
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -36,12 +45,31 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--embeddings-dir", type=Path, default=Path("/workspace/data/diving48_embeddings"))
     parser.add_argument("--train-file", type=Path, default=None)
     parser.add_argument("--val-file", type=Path, default=None)
-    parser.add_argument("--variant", default="diff_pgm_info_attention")
+    parser.add_argument("--variant", default="diff_pgm_info_accum")
     parser.add_argument("--variants", default="all")
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--weight-decay", type=float, default=None)
+    parser.add_argument("--early-stop-patience", type=int, default=None)
+    parser.add_argument("--progress-every", type=int, default=None)
+    parser.add_argument(
+        "--frame-pgm-type",
+        choices=["none", "gaussian_chain", "learnable_gaussian_chain"],
+        default=None,
+        help="Optional frame-side PGM smoother applied before DiffNet.",
+    )
+    parser.add_argument(
+        "--frame-lambda-smooth",
+        type=float,
+        default=None,
+        help="Frame-side Gaussian chain smoothness lambda.",
+    )
+    parser.add_argument(
+        "--classifier-type",
+        choices=["mlp", "attention_pool", "temporal_evidence_attention"],
+        default=None,
+    )
     parser.add_argument("--device", default="auto", choices=["auto", "cuda", "mps", "cpu"])
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--output-root", type=Path, default=None)
@@ -55,6 +83,8 @@ def resolve_path(path: Path) -> Path:
 def ablation_from_variant(value: str) -> str:
     normalized = value.strip()
     upper = normalized.upper()
+    if upper == "E4":
+        return "E3"
     if upper in ABLATION_INFO:
         return upper
     if normalized in VARIANT_TO_ABLATION:
@@ -135,19 +165,23 @@ def configure_full_run(
         run_dir=None,
         ablation_id=ablation_id,
         pgm_type=spec["pgm_type"],
-        classifier_type=spec["classifier_type"],
+        frame_pgm_type=args.frame_pgm_type,
+        classifier_type=args.classifier_type or spec["classifier_type"],
         lambda_smooth=spec["lambda_smooth"],
+        frame_lambda_smooth=args.frame_lambda_smooth,
         use_alpha=spec["use_alpha"],
         epochs=args.epochs,
         device=args.device,
         batch_size=args.batch_size,
         lr=args.lr,
         weight_decay=args.weight_decay,
+        early_stop_patience=args.early_stop_patience,
+        progress_every=args.progress_every,
         seed=args.seed,
     )
     config.setdefault("information_matrix", {})["enabled"] = bool(spec["information_enabled"])
     config["information_matrix"]["use_alpha"] = bool(spec["use_alpha"])
-    config.setdefault("classifier", {})["type"] = spec["classifier_type"]
+    config.setdefault("classifier", {})["type"] = args.classifier_type or spec["classifier_type"]
     config.setdefault("pgm_smoother", {})["type"] = spec["pgm_type"]
     config["pgm_smoother"]["lambda_smooth"] = spec["lambda_smooth"]
     config.setdefault("notes", "RunPod full training launcher run.")

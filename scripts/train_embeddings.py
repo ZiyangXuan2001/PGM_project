@@ -21,10 +21,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=PROJECT_ROOT / "configs" / "default.yaml")
     parser.add_argument("--train_file", type=Path, default=None)
     parser.add_argument("--val_file", type=Path, default=None)
-    parser.add_argument("--ablation_id", choices=["E0", "E1", "E2", "E3", "E4"], default=None)
+    parser.add_argument("--ablation_id", choices=["E0", "E1", "E1.5", "E2", "E3", "E4"], default=None)
     parser.add_argument(
         "--model_variant",
         choices=[
+            "feature_mean",
+            "diff_mean",
+            "diff_info_accum",
+            "diff_pgm_mean",
+            "diff_pgm_info_accum",
             "mean_pool_baseline",
             "diff_only",
             "diff_pgm",

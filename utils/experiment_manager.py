@@ -48,6 +48,12 @@ TRAIN_LOG_FIELDS = [
     "val_loss",
     "train_top1",
     "val_top1",
+    "val_correction_magnitude",
+    "val_observation_residual",
+    "val_smoothness_energy",
+    "val_frame_pgm_correction_magnitude",
+    "val_frame_pgm_observation_residual",
+    "val_frame_pgm_smoothness_energy",
     "lr",
     "epoch_time_sec",
 ]
@@ -55,18 +61,18 @@ TRAIN_LOG_FIELDS = [
 
 ABLATION_INFO: dict[str, dict[str, str]] = {
     "E0": {
-        "variant": "mean_pool_baseline",
-        "purpose": "Basic frozen CLIP frame-embedding baseline with no explicit temporal modeling.",
+        "variant": "feature_mean",
+        "purpose": "Frozen feature mean baseline with no DiffNet, PGM, or accumulator.",
         "architecture": (
             "X {input_shape}\n"
-            "-> mean_pool over T\n"
+            "-> mean_pool over T and spatial tokens if present\n"
             "-> MLP classifier\n"
             "-> logits [B, 48]"
         ),
     },
     "E1": {
-        "variant": "diff_only",
-        "purpose": "Test whether learned adjacent-frame difference embeddings help.",
+        "variant": "diff_mean",
+        "purpose": "Test whether learned adjacent-frame DiffNet observations help.",
         "architecture": (
             "X {input_shape}\n"
             "-> PairwiseDiffNet\n"
@@ -76,9 +82,22 @@ ABLATION_INFO: dict[str, dict[str, str]] = {
             "-> logits [B, 48]"
         ),
     },
+    "E1.5": {
+        "variant": "diff_info_accum",
+        "purpose": "Control for the InformationMatrixAccumulator without PGM inference.",
+        "architecture": (
+            "X {input_shape}\n"
+            "-> PairwiseDiffNet\n"
+            "-> R [B, T-1, d_y]\n"
+            "-> InformationMatrixAccumulator(K = {K}, d_h = {d_h}, use_alpha = {use_alpha})\n"
+            "-> mean_pool over K\n"
+            "-> MLP classifier\n"
+            "-> logits [B, 48]"
+        ),
+    },
     "E2": {
-        "variant": "diff_pgm",
-        "purpose": "Test whether Gaussian-chain PGM smoothing improves temporal difference features.",
+        "variant": "diff_pgm_mean",
+        "purpose": "Test whether Gaussian PGM smoothing improves mean-pooled DiffNet observations.",
         "architecture": (
             "X {input_shape}\n"
             "-> PairwiseDiffNet\n"
@@ -91,35 +110,47 @@ ABLATION_INFO: dict[str, dict[str, str]] = {
         ),
     },
     "E3": {
-        "variant": "diff_pgm_info",
-        "purpose": "Test whether the information matrix accumulation improves over pooled smoothed temporal features.",
+        "variant": "diff_pgm_info_accum",
+        "purpose": "Test whether PGM MAP evidence improves over the no-PGM accumulator baseline.",
         "architecture": (
             "X {input_shape}\n"
             "-> PairwiseDiffNet\n"
             "-> R [B, T-1, d_y]\n"
             "-> GaussianPGMSmoother(lambda_smooth = {lambda_smooth})\n"
             "-> Y [B, T-1, d_y]\n"
+            "-> local PGM evidence U [B, T-1, 3*d_y+2]\n"
             "-> InformationMatrixAccumulator(K = {K}, d_h = {d_h}, use_alpha = {use_alpha})\n"
             "-> mean_pool over K\n"
             "-> MLP classifier\n"
             "-> logits [B, 48]"
         ),
     },
-    "E4": {
-        "variant": "diff_pgm_info_attention",
-        "purpose": "Test whether attention pooling over the information matrix improves over simple mean pooling.",
-        "architecture": (
-            "X {input_shape}\n"
-            "-> PairwiseDiffNet\n"
-            "-> R [B, T-1, d_y]\n"
-            "-> GaussianPGMSmoother(lambda_smooth = {lambda_smooth})\n"
-            "-> Y [B, T-1, d_y]\n"
-            "-> InformationMatrixAccumulator(K = {K}, d_h = {d_h}, use_alpha = {use_alpha})\n"
-            "-> Attention pooling classifier head\n"
-            "-> logits [B, 48]"
-        ),
+    "P-noPGM": {
+        "variant": "p_traj_no_pgm",
+        "purpose": "Projected CLIP trajectory-matrix baseline with no frame PGM.",
+        "architecture": "P-series trajectory-matrix baseline.",
+    },
+    "P-PGM": {
+        "variant": "p_traj_pgm",
+        "purpose": "Projected CLIP trajectory-matrix model with only fixed frame-level Gaussian PGM smoothing.",
+        "architecture": "P-series trajectory-matrix model with frame PGM.",
+    },
+    "P-prePGM": {
+        "variant": "p_traj_pre_pgm",
+        "purpose": "Test fixed Gaussian PGM smoothing on raw CLIP frame features before the trajectory-matrix-linear path.",
+        "architecture": "P-series trajectory-matrix model with pre-trajectory frame PGM.",
     },
 }
+
+LEGACY_VARIANT_ALIASES = {
+    "mean_pool_baseline": "feature_mean",
+    "diff_only": "diff_mean",
+    "diff_pgm": "diff_pgm_mean",
+    "diff_pgm_info": "diff_pgm_info_accum",
+    "diff_pgm_info_attention": "diff_pgm_info_accum",
+}
+
+LEGACY_ABLATION_ALIASES = {"E4": "E3"}
 
 
 @dataclass
@@ -148,11 +179,35 @@ def short_id() -> str:
     return uuid.uuid4().hex[:4]
 
 
+def is_p_series_config(config: dict[str, Any]) -> bool:
+    model_config = config.get("model", {})
+    model_name = model_config.get("name", model_config.get("type"))
+    return str(model_name) in {"p_series_trajectory_matrix", "p_series_trajectory"}
+
+
+def p_series_uses_pgm(config: dict[str, Any]) -> bool:
+    model_config = config.get("model", {})
+    pgm_config = config.get("pgm", {})
+    lambda_frame = float(pgm_config.get("lambda_frame", model_config.get("lambda_frame", 0.0)) or 0.0)
+    return bool(model_config.get("use_pgm", False)) and lambda_frame > 0.0
+
+
+def p_series_uses_pre_pgm(config: dict[str, Any]) -> bool:
+    model_config = config.get("model", {})
+    pre_pgm_config = config.get("pre_pgm", {})
+    lambda_frame = float(pre_pgm_config.get("lambda_frame", model_config.get("pre_lambda_frame", 0.0)) or 0.0)
+    return bool(model_config.get("use_pre_pgm", False)) and lambda_frame > 0.0
+
+
 def get_ablation_id(config: dict[str, Any]) -> str:
     model_config = config.get("model", {})
-    variant = model_config.get("variant")
+    if is_p_series_config(config) and not model_config.get("ablation_id"):
+        if p_series_uses_pre_pgm(config):
+            return "P-prePGM"
+        return "P-PGM" if p_series_uses_pgm(config) else "P-noPGM"
+    variant = LEGACY_VARIANT_ALIASES.get(str(model_config.get("variant")), model_config.get("variant"))
     if model_config.get("ablation_id"):
-        return str(model_config["ablation_id"])
+        return LEGACY_ABLATION_ALIASES.get(str(model_config["ablation_id"]), str(model_config["ablation_id"]))
     for ablation_id, info in ABLATION_INFO.items():
         if info["variant"] == variant:
             return ablation_id
@@ -161,21 +216,30 @@ def get_ablation_id(config: dict[str, Any]) -> str:
 
 def get_model_variant(config: dict[str, Any]) -> str:
     ablation_id = get_ablation_id(config)
-    return str(config.get("model", {}).get("variant", ABLATION_INFO[ablation_id]["variant"]))
+    variant = str(config.get("model", {}).get("variant", ABLATION_INFO[ablation_id]["variant"]))
+    return LEGACY_VARIANT_ALIASES.get(variant, variant)
 
 
 def get_lambda_value(config: dict[str, Any]) -> str:
     ablation_id = get_ablation_id(config)
-    if ablation_id in {"E0", "E1"}:
+    if is_p_series_config(config):
+        if p_series_uses_pre_pgm(config):
+            return f"preframefixed{config.get('pre_pgm', {}).get('lambda_frame', 'none')}"
+        if not p_series_uses_pgm(config):
+            return "none"
+        return f"framefixed{config.get('pgm', {}).get('lambda_frame', 'none')}"
+    frame_pgm = config.get("frame_pgm_smoother", {})
+    frame_pgm_type = str(frame_pgm.get("type", "none"))
+    if frame_pgm_type != "none":
+        type_label = "learn" if frame_pgm_type == "learnable_gaussian_chain" else "fixed"
+        return f"frame{type_label}{frame_pgm.get('lambda_smooth', 'none')}"
+    if ablation_id in {"E0", "E1", "E1.5", "P-noPGM", "P-PGM"}:
         return "none"
     return str(config.get("pgm_smoother", {}).get("lambda_smooth", "none"))
 
 
 def get_classifier_label(config: dict[str, Any]) -> str:
-    variant = get_model_variant(config)
-    if variant == "diff_pgm_info_attention":
-        return "attention"
-    return "mlp"
+    return str(config.get("classifier", {}).get("type", "mlp"))
 
 
 def build_run_name(config: dict[str, Any]) -> str:
@@ -239,18 +303,82 @@ def architecture_text(config: dict[str, Any]) -> str:
     ablation_id = get_ablation_id(config)
     info = ABLATION_INFO[ablation_id]
     backbone_config = config.get("backbone", {})
-    input_dim = backbone_config.get("input_dim", 512)
+    diff_config = config.get("diff_nn", {})
+    diff_net_type = diff_config.get("diff_net_type", diff_config.get("type", "pairwise_diff_net"))
+    diff_net_label = "SimpleConcatPairwiseDiffNet" if diff_net_type == "simple_concat_pairwise" else "PairwiseDiffNet"
+    input_dim = config.get("model", {}).get("clip_dim", backbone_config.get("input_dim", 512))
     if backbone_config.get("feature_format") == "spatial_map":
         input_shape = f"[B, T, {backbone_config.get('spatial_tokens', 49)}, {input_dim}]"
     else:
         input_shape = f"[B, T, {input_dim}]"
-    return info["architecture"].format(
+    if ablation_id in {"P-noPGM", "P-PGM", "P-prePGM"}:
+        model_config = config.get("model", {})
+        pgm_config = config.get("pgm", {})
+        pre_pgm_config = config.get("pre_pgm", {})
+        projection_dim = model_config.get("d_z", config.get("temporal_projection", {}).get("output_dim", 128))
+        relation_dim = model_config.get("d_r", diff_config.get("d_y", diff_config.get("output_dim", 128)))
+        num_frames = model_config.get("num_frames", backbone_config.get("num_frames", 16))
+        num_pairs = int(num_frames) - 1
+        use_pgm = p_series_uses_pgm(config)
+        use_pre_pgm = p_series_uses_pre_pgm(config)
+        lines = [
+            f"X {input_shape}",
+        ]
+        if use_pre_pgm:
+            lines.extend(
+                [
+                    (
+                        "-> GaussianFramePGMSmoother"
+                        f"(pre, lambda_frame = {pre_pgm_config.get('lambda_frame', 'none')})"
+                    ),
+                    f"-> X_smooth {input_shape}",
+                ]
+            )
+        lines.extend(
+            [
+                "-> TemporalProjection",
+                f"-> U [B, T, {projection_dim}]",
+            ]
+        )
+        if use_pgm:
+            lines.extend(
+                [
+                    (
+                        "-> GaussianFramePGMSmoother"
+                        f"(lambda_frame = {pgm_config.get('lambda_frame', 'none')})"
+                    ),
+                    f"-> Z [B, T, {projection_dim}]",
+                ]
+            )
+        lines.extend(
+            [
+                "-> ProjectedPairwiseDiffNet",
+                f"-> R [B, T-1, {relation_dim}]",
+                f"-> flatten R [B, {num_pairs * int(relation_dim)}]",
+                "-> TrajectoryMatrixClassifier",
+                "-> logits [B, 48]",
+            ]
+        )
+        return "\n".join(lines)
+    architecture = info["architecture"].format(
         input_shape=input_shape,
         lambda_smooth=config.get("pgm_smoother", {}).get("lambda_smooth", "none"),
         K=config.get("information_matrix", {}).get("K", 8),
         d_h=config.get("information_matrix", {}).get("d_h", 128),
         use_alpha=str(bool(config.get("information_matrix", {}).get("use_alpha", False))).lower(),
     )
+    frame_pgm = config.get("frame_pgm_smoother", {})
+    if frame_pgm.get("type", "none") != "none":
+        architecture = architecture.replace(
+            f"X {input_shape}\n",
+            (
+                f"X {input_shape}\n"
+                f"-> FrameGaussianPGMSmoother(lambda_smooth = {frame_pgm.get('lambda_smooth', 'none')})\n"
+                f"-> Z {input_shape}\n"
+            ),
+            1,
+        )
+    return architecture.replace("PairwiseDiffNet", diff_net_label)
 
 
 def write_model_summary(config: dict[str, Any], run_dir: Path) -> None:
@@ -261,6 +389,19 @@ def write_model_summary(config: dict[str, Any], run_dir: Path) -> None:
     num_frames = config.get("backbone", {}).get("num_frames", 16)
     input_dim = config.get("backbone", {}).get("input_dim", 512)
     backbone = config.get("backbone", {}).get("name", "precomputed_clip_vit_b16")
+    diff_config = config.get("diff_nn", {})
+    diff_net_type = diff_config.get("diff_net_type", diff_config.get("type", "pairwise_diff_net"))
+    frame_pgm = config.get("frame_pgm_smoother", {})
+    frame_pgm_type = frame_pgm.get("type", "none")
+    frame_pgm_lambda = frame_pgm.get("lambda_smooth", "none")
+    if is_p_series_config(config):
+        model_config = config.get("model", {})
+        if p_series_uses_pre_pgm(config):
+            frame_pgm_type = "pre_gaussian_chain"
+            frame_pgm_lambda = config.get("pre_pgm", {}).get("lambda_frame", "none")
+        elif p_series_uses_pgm(config):
+            frame_pgm_type = "post_projected_gaussian_chain"
+            frame_pgm_lambda = config.get("pgm", {}).get("lambda_frame", "none")
     if config.get("backbone", {}).get("feature_format") == "spatial_map":
         input_shape = f"X [B, {num_frames}, {config.get('backbone', {}).get('spatial_tokens', 49)}, {input_dim}]"
     else:
@@ -272,6 +413,9 @@ def write_model_summary(config: dict[str, Any], run_dir: Path) -> None:
         f"Dataset: {dataset}",
         f"Input type: {backbone} frame embeddings",
         f"Input shape: {input_shape}",
+        f"Frame PGM smoother: {frame_pgm_type}",
+        f"Frame PGM lambda_smooth: {frame_pgm_lambda}",
+        f"DiffNet type: {diff_net_type}",
         f"Number of classes: {num_classes}",
         "",
         "Architecture:",
@@ -312,8 +456,14 @@ def write_experiment_card(config: dict[str, Any], metrics: dict[str, Any], run_d
     info = config.get("information_matrix", {})
     classifier = config.get("classifier", {})
     pgm = config.get("pgm_smoother", {})
+    frame_pgm = config.get("frame_pgm_smoother", {})
+    pre_pgm = config.get("pre_pgm", {})
+    p_series_pgm = config.get("pgm", {})
+    model_config = config.get("model", {})
     output = config.get("output", {})
     backbone = config.get("backbone", {}).get("name", "precomputed_clip_vit_b16")
+    diff_config = config.get("diff_nn", {})
+    diff_net_type = diff_config.get("diff_net_type", diff_config.get("type", "pairwise_diff_net"))
     card = f"""# Experiment Card
 
 ## Run identity
@@ -332,6 +482,9 @@ def write_experiment_card(config: dict[str, Any], metrics: dict[str, Any], run_d
 Pipeline:
 {architecture_text(config)}
 
+PGM interpretation:
+If frame_pgm_smoother is enabled, frozen frame embeddings X_t are treated as noisy observations of latent clean frame states Z_t before DiffNet. If pgm_smoother is enabled after DiffNet, R_t is treated as noisy pairwise temporal evidence and smoothed into Y_t. The true Gaussian PGM information matrix is A = alpha I + lambda L, where L is the temporal path graph Laplacian. The learned InformationMatrixAccumulator is a learned sequential evidence accumulator, not the same object as A.
+
 ## Main purpose
 
 {ABLATION_INFO[ablation_id]["purpose"]}
@@ -341,6 +494,16 @@ Pipeline:
 | Field | Value |
 |---|---|
 | model.variant | {get_model_variant(config)} |
+| diff_nn.diff_net_type | {diff_net_type} |
+| diff_nn.hidden_dim | {diff_config.get("hidden_dim")} |
+| diff_nn.d_y | {diff_config.get("d_y")} |
+| diff_nn.dropout | {diff_config.get("dropout")} |
+| model.use_pre_pgm | {model_config.get("use_pre_pgm")} |
+| pre_pgm.lambda_frame | {pre_pgm.get("lambda_frame")} |
+| model.use_pgm | {model_config.get("use_pgm")} |
+| pgm.lambda_frame | {p_series_pgm.get("lambda_frame")} |
+| frame_pgm_smoother.type | {frame_pgm.get("type", "none")} |
+| frame_pgm_smoother.lambda_smooth | {frame_pgm.get("lambda_smooth", "none")} |
 | pgm_smoother.lambda_smooth | {pgm.get("lambda_smooth")} |
 | information_matrix.use_alpha | {info.get("use_alpha")} |
 | information_matrix.K | {info.get("K")} |
@@ -349,6 +512,7 @@ Pipeline:
 | training.lr | {training.get("lr")} |
 | training.batch_size | {training.get("batch_size")} |
 | training.epochs | {training.get("epochs")} |
+| training.early_stop_patience | {training.get("early_stop_patience")} |
 
 ## Results
 
@@ -356,6 +520,9 @@ Pipeline:
 |---|---|
 | best_val_top1 | {value_or_null(metrics.get("best_val_top1"))} |
 | best_val_epoch | {value_or_null(metrics.get("best_val_epoch"))} |
+| epochs_trained | {value_or_null(metrics.get("epochs_trained"))} |
+| early_stopped | {value_or_null(metrics.get("early_stopped"))} |
+| stop_reason | {value_or_null(metrics.get("stop_reason"))} |
 | final_train_loss | {value_or_null(metrics.get("final_train_loss"))} |
 | final_val_loss | {value_or_null(metrics.get("final_val_loss"))} |
 | final_train_top1 | {value_or_null(metrics.get("final_train_top1"))} |
@@ -384,7 +551,7 @@ def append_registry(config: dict[str, Any], metrics: dict[str, Any], run_dir: Pa
     exists = registry_path.is_file()
     ablation_id = get_ablation_id(config)
     info_config = config.get("information_matrix", {})
-    info_enabled = bool(info_config.get("enabled", ablation_id in {"E3", "E4"}))
+    info_enabled = bool(info_config.get("enabled", ablation_id in {"E1.5", "E3"}))
     row = {
         "run_name": metrics.get("run_name"),
         "date": metrics.get("date"),

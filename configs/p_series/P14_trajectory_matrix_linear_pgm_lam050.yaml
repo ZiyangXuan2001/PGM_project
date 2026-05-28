@@ -1,0 +1,53 @@
+metadata:
+  run_id: P14
+  trajectory_head: trajectory_matrix_linear
+  use_pgm: true
+  pgm_lambda: 0.50
+  use_pre_pgm: false
+  pre_pgm_lambda: null
+
+dataset:
+  name: diving48_v2
+  num_classes: 48
+
+model:
+  name: p_series_trajectory_matrix
+  use_pgm: true
+  use_pre_pgm: false
+  clip_dim: 512
+  num_frames: 16
+  d_z: 128
+  d_r: 128
+  num_classes: 48
+
+pgm:
+  alpha: 1.0
+  lambda_frame: 0.50
+
+diffnet:
+  hidden_dim: 256
+  dropout: 0.25
+
+classifier:
+  type: trajectory_matrix_linear
+  dropout: 0.3
+
+training:
+  batch_size: 128
+  lr: 1e-4
+  weight_decay: 1e-3
+  epochs: 120
+  early_stop_patience: 30
+  device: auto
+  seed: 0
+  save_best: true
+  progress_every: 50
+
+output:
+  root: outputs/runs
+
+logging:
+  use_wandb: false
+  wandb_project: diving48-p-series
+
+notes: "P14: trajectory_matrix_linear + postPGM lambda=0.50."

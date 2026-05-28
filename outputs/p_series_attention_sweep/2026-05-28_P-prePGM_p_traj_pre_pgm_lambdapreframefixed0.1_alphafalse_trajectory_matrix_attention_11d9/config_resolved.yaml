@@ -1,0 +1,59 @@
+metadata:
+  run_id: P7
+  trajectory_head: trajectory_matrix_attention
+  use_pgm: false
+  pgm_lambda: null
+  use_pre_pgm: true
+  pre_pgm_lambda: 0.1
+  source_config: P7_prePGM_lam010_trajectory_matrix_linear.yaml
+dataset:
+  name: diving48_v2
+  num_classes: 48
+model:
+  name: p_series_trajectory_matrix
+  use_pgm: false
+  use_pre_pgm: true
+  clip_dim: 512
+  num_frames: 16
+  d_z: 128
+  d_r: 128
+  num_classes: 48
+pre_pgm:
+  alpha: 1.0
+  lambda_frame: 0.1
+pgm:
+  alpha: 1.0
+  lambda_frame: 0.0
+diffnet:
+  hidden_dim: 256
+  dropout: 0.25
+classifier:
+  type: trajectory_matrix_attention
+  dropout: 0.3
+  hidden_dim: 256
+  num_heads: 4
+training:
+  batch_size: 128
+  lr: 1e-4
+  weight_decay: 1e-3
+  epochs: 120
+  early_stop_patience: 30
+  device: auto
+  seed: 0
+  save_best: true
+  progress_every: 50
+output:
+  root: C:\Users\ziyan\OneDrive\Desktop\PGM_project\outputs\p_series_attention_sweep
+  run_name: 2026-05-28_P-prePGM_p_traj_pre_pgm_lambdapreframefixed0.1_alphafalse_trajectory_matrix_attention_11d9
+  run_dir: C:\Users\ziyan\OneDrive\Desktop\PGM_project\outputs\p_series_attention_sweep\2026-05-28_P-prePGM_p_traj_pre_pgm_lambdapreframefixed0.1_alphafalse_trajectory_matrix_attention_11d9
+  checkpoints_dir: C:\Users\ziyan\OneDrive\Desktop\PGM_project\outputs\p_series_attention_sweep\2026-05-28_P-prePGM_p_traj_pre_pgm_lambdapreframefixed0.1_alphafalse_trajectory_matrix_attention_11d9\checkpoints
+  checkpoint_best: C:\Users\ziyan\OneDrive\Desktop\PGM_project\outputs\p_series_attention_sweep\2026-05-28_P-prePGM_p_traj_pre_pgm_lambdapreframefixed0.1_alphafalse_trajectory_matrix_attention_11d9\checkpoints\best.pt
+  checkpoint_last: C:\Users\ziyan\OneDrive\Desktop\PGM_project\outputs\p_series_attention_sweep\2026-05-28_P-prePGM_p_traj_pre_pgm_lambdapreframefixed0.1_alphafalse_trajectory_matrix_attention_11d9\checkpoints\last.pt
+logging:
+  use_wandb: false
+  wandb_project: diving48-p-series
+notes: Attention-head lambda sweep copied from P7_prePGM_lam010_trajectory_matrix_linear.yaml.
+  Same PGM placement/lambda as the source config; classifier is direct trajectory_matrix_attention
+  over DiffNet relation tokens R. No InformationMatrixAccumulator.
+backbone:
+  input_dim: 512
