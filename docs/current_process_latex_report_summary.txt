@@ -1,0 +1,1200 @@
+Current Project Summary For LaTeX Report
+=======================================
+
+Date written: 2026-05-28
+Project: PGM_project
+Task: Diving48 V2 video classification using frozen visual features and lightweight temporal / PGM heads.
+
+
+1. Executive Summary
+--------------------
+
+This project studies whether probabilistic graphical model (PGM) smoothing can
+improve video classification when the visual backbone is frozen. The target
+dataset is Diving48 V2, a fine-grained diving action dataset with 48 classes.
+The main input representation is frozen CLIP ViT-B/16 frame embeddings:
+
+    X: [B, T, D] = [B, 16, 512]
+
+where each video is represented by 16 uniformly sampled frame features.
+
+The central PGM idea is to treat a temporal sequence of feature vectors as noisy
+observations and infer a smoother latent trajectory using a Gaussian chain PGM.
+The Gaussian chain has the MAP objective
+
+    Z* = argmin_Z [
+        alpha * sum_t ||Z_t - X_t||^2
+        + lambda * sum_t ||Z_t - Z_{t-1}||^2
+    ].
+
+Equivalently, for a temporal path graph Laplacian L,
+
+    (alpha I + lambda L) Z = alpha X.
+
+Several model families were implemented and tested:
+
+1. E-series controlled ablations:
+   - DiffNet + optional GaussianPGMSmoother + optional InformationAccumulator.
+   - Best single-seed PGM-related result:
+       feature-side learnable PGM + E3 post-DiffNet PGM evidence
+       best validation top-1 = 22.23%.
+
+2. P-series simplified trajectory-matrix ablations:
+   - A cleaner report-friendly family with no attention classifier and no
+     InformationAccumulator.
+   - Tests no PGM vs pre-trajectory PGM vs post-trajectory PGM.
+   - Multi-seed result supports the main PGM claim:
+       noPGM mean best val top-1 = 15.27%
+       prePGM lambda=0.30 mean best val top-1 = 16.16%
+       postPGM lambda=0.80 mean best val top-1 = 16.51%
+
+Recommended report focus:
+
+    Use the P-series as the main clean PGM experiment because it is simpler,
+    controlled, and multi-seed. Use the E-series as an extended model family
+    showing that stronger neural heads can reach higher validation accuracy,
+    but the PGM contribution there is harder to isolate.
+
+
+2. Dataset And Features
+-----------------------
+
+Dataset:
+
+    Diving48 V2
+    Number of classes: 48
+    Number of training videos: 15,943
+    Number of validation/test videos: 2,096
+    Uniform sampled frames per video: T = 16
+
+Local feature paths currently used:
+
+    CLIP train:
+        C:\data\diving48_embeddings\clip_vit_b16\train.pt
+        X shape: [15943, 16, 512]
+
+    CLIP validation/test:
+        C:\data\diving48_embeddings\clip_vit_b16\test.pt
+        X shape: [2096, 16, 512]
+
+Important terminology:
+
+    In the local experiments, test.pt is used as the validation split. Unless a
+    separate final holdout protocol is created, report these numbers as
+    validation top-1, not final test-set performance.
+
+Other feature families explored:
+
+1. ResNet50 global pooled features:
+   - Shape: [N, 16, 2048].
+   - Performed poorly compared with CLIP features.
+   - Likely reason: global average pooling removes spatial pose/body geometry
+     that is important for Diving48.
+
+2. ResNet50 layer4 spatial features:
+   - Shape: [N, 16, 49, 2048].
+   - 49 = 7x7 spatial tokens.
+   - Preserves more local spatial information than global pooling.
+   - Still underperformed CLIP global features in the experiments run so far.
+
+3. ResNet50 layer3 spatial features:
+   - Shape: [N, 16, 196, 1024].
+   - 196 = 14x14 spatial tokens.
+   - Intended to preserve more pose geometry.
+   - Also underperformed in current compact heads.
+
+Resulting representation diagnosis:
+
+    Frozen CLIP global frame embeddings are currently the strongest practical
+    representation in this project, even though they are not ideal for
+    fine-grained pose. ResNet global/spatial features did not improve accuracy
+    under the tested lightweight heads.
+
+
+3. Core Gaussian PGM
+--------------------
+
+The Gaussian temporal smoother is a fixed MAP inference layer over a path graph.
+For a sequence S = [S_1, ..., S_T], it infers latent states Z by minimizing
+
+    E(Z) = alpha * sum_t ||Z_t - S_t||^2
+           + lambda * sum_t ||Z_t - Z_{t-1}||^2.
+
+Here:
+
+    alpha controls observation fidelity.
+    lambda controls temporal smoothness.
+    L is the temporal path graph Laplacian.
+    A = alpha I + lambda L is the Gaussian information matrix.
+
+The closed-form MAP solve is
+
+    Z* = A^{-1} alpha S.
+
+Implementation notes:
+
+    - Fixed Gaussian smoothing has zero trainable parameters.
+    - Some E-series runs also support learnable lambda, which adds only a scalar.
+    - The PGM layer preserves tensor shape.
+    - The PGM layer is differentiable, but in fixed-lambda P-series experiments
+      it does not add model capacity.
+
+
+4. E-Series Model Family
+------------------------
+
+The E-series is the original controlled DiffNet + PGM + information accumulator
+family. It is useful because it directly tests the proposed PGM evidence idea,
+but some later E-series variants use a large temporal attention classifier, so
+PGM contribution must be interpreted carefully.
+
+Common CLIP input:
+
+    X: [B, 16, 512]
+
+Most CLIP E-series runs use:
+
+    d_y = 128
+    DiffNet hidden_dim = 256
+    InformationAccumulator K = 8
+    InformationAccumulator d_h = 128
+    num_classes = 48
+
+
+4.1 PairwiseDiffNet
+-------------------
+
+For adjacent frames:
+
+    x_t:      [B, 15, 512]
+    x_next:   [B, 15, 512]
+    diff:     x_next - x_t
+    abs_diff: |x_next - x_t|
+
+The original PairwiseDiffNet input is
+
+    [x_t, x_next, diff, abs_diff] -> [B, 15, 2048].
+
+Default stack:
+
+    Linear(2048 -> 256)
+    GELU
+    LayerNorm(256)
+    Dropout
+    Linear(256 -> 128)
+
+Output:
+
+    R: [B, 15, 128]
+
+Interpretation:
+
+    R_t is a learned pairwise temporal observation/relation feature between
+    frames t and t+1.
+
+
+4.2 E-Series Ablation Definitions
+---------------------------------
+
+E0: feature_mean
+
+    X -> mean over time -> classifier -> logits
+
+Purpose:
+
+    Frozen feature baseline. No temporal relation modeling, no DiffNet, no PGM,
+    no accumulator.
+
+E1: diff_mean
+
+    X -> PairwiseDiffNet -> R -> mean_t(R_t) -> classifier -> logits
+
+Purpose:
+
+    Tests whether learned adjacent-frame temporal differences help over mean
+    CLIP features.
+
+E1.5: diff_info_accum
+
+    X -> PairwiseDiffNet -> R -> InformationAccumulator -> H_final
+      -> classifier -> logits
+
+Purpose:
+
+    No-PGM accumulator control. This is essential because E3 uses an
+    InformationAccumulator, so E1.5 separates the effect of the accumulator from
+    the effect of PGM inference.
+
+E2: diff_pgm_mean
+
+    X -> PairwiseDiffNet -> R -> GaussianPGMSmoother -> Y
+      -> mean_t(Y_t) -> classifier -> logits
+
+Purpose:
+
+    Tests whether naive Gaussian smoothing of DiffNet outputs helps when the
+    classifier only sees the mean smoothed relation.
+
+Important observation:
+
+    E2 often matches E1 when classification uses only mean pooling, because the
+    Gaussian smoother tends to preserve or weakly change the temporal mean.
+
+E3: diff_pgm_info_accum
+
+    X -> PairwiseDiffNet -> R -> GaussianPGMSmoother -> Y
+      -> local PGM evidence U -> InformationAccumulator -> H_final
+      -> classifier -> logits
+
+Purpose:
+
+    Main PGM evidence model. It tests whether PGM MAP inference provides useful
+    local evidence beyond the raw DiffNet observations.
+
+
+4.3 E3 Local PGM Evidence
+-------------------------
+
+For each time step t:
+
+    delta_t = Y_t - R_t
+    abs_delta_t = |Y_t - R_t|
+
+    residual_t =
+        mean over feature dim of (Y_t - R_t)^2
+        shape [B, 1]
+
+    smoothness_t =
+        mean over feature dim of (Y_t - Y_{t-1})^2
+        shape [B, 1]
+
+For t = 0, smoothness_t is set to zero because there is no previous Y.
+
+The E3 evidence vector is
+
+    u_t = concat[R_t, Y_t, abs_delta_t, residual_t, smoothness_t].
+
+If d_y = 128:
+
+    dim(u_t) = 3 * 128 + 2 = 386
+    U: [B, 15, 386]
+
+If d_y = 64:
+
+    dim(u_t) = 3 * 64 + 2 = 194.
+
+
+4.4 InformationAccumulator
+--------------------------
+
+The InformationAccumulator maintains a learned information state
+
+    H: [B, K, d_h] = [B, 8, 128]
+
+and updates it sequentially using either R_t in E1.5 or U_t in E3.
+
+Important conceptual clarification:
+
+    The true Gaussian PGM information matrix is A = alpha I + lambda L.
+    The learned InformationAccumulator is not the same as A. It is a learned
+    sequential evidence accumulator. E1.5 controls for this accumulator, and E3
+    tests whether PGM-inferred local evidence improves the accumulator input.
+
+
+4.5 Feature-Side Frame PGM
+--------------------------
+
+A later idea was that smoothing after DiffNet may be conceptually questionable:
+DiffNet outputs directional pairwise relation vectors, and those vectors may not
+need to be smooth. For example, real diving motion can change direction or phase
+quickly. Therefore a more natural PGM placement is before DiffNet, directly on
+the frozen frame observations.
+
+Feature-side PGM formulation:
+
+    X_t: frozen CLIP frame observation
+    Z_t: latent cleaned frame state
+
+    Z* = argmin_Z [
+        alpha * sum_t ||Z_t - X_t||^2
+        + lambda * sum_t ||Z_t - Z_{t-1}||^2
+    ]
+
+Then:
+
+    X: [B, 16, 512]
+    -> FrameGaussianPGMSmoother
+    -> Z: [B, 16, 512]
+    -> PairwiseDiffNet(Z_t, Z_{t+1})
+    -> R: [B, 15, 128]
+
+Feature-side PGM can be combined with E1, E1.5, or E3:
+
+    feature PGM + E1:
+        Z -> DiffNet -> mean(R) -> classifier
+
+    feature PGM + E1.5:
+        Z -> DiffNet -> accumulator(R) -> classifier
+
+    feature PGM + E3:
+        Z -> DiffNet -> R -> post-DiffNet PGM -> U -> accumulator(U)
+
+The strongest E-series PGM result uses both:
+
+    feature-side learnable PGM before DiffNet
+    plus post-DiffNet PGM evidence inside E3.
+
+
+4.6 E-Series Parameter Notes
+----------------------------
+
+Approximate trainable parameter counts for CLIP E-series:
+
+    E1 default PairwiseDiffNet + MLP:
+        about 603k trainable parameters.
+
+    E1.5 with temporal evidence attention:
+        about 1.52M trainable parameters.
+
+    E3 with temporal evidence attention:
+        about 1.62M trainable parameters.
+
+The temporal evidence attention classifier is large:
+
+    E3 temporal evidence attention classifier:
+        about 800k trainable parameters.
+
+Therefore, E-series attention results are useful, but they are not the cleanest
+evidence that PGM alone helps. This is one reason the P-series simplified model
+is better for the main course-project claim.
+
+
+5. E-Series Results
+-------------------
+
+Important CLIP E-series results:
+
+1. E0 feature_mean, MLP:
+
+    Run:
+        2026-05-23_E0_feature_mean_lambdanone_alphafalse_mlp_487c
+
+    Best validation top-1:
+        11.93%
+
+    Best epoch:
+        98
+
+2. E1 diff_mean, MLP:
+
+    Run:
+        2026-05-23_E1_diff_mean_lambdanone_alphafalse_mlp_51e8
+
+    Best validation top-1:
+        17.37%
+
+    Best epoch:
+        113
+
+    Interpretation:
+        Pairwise temporal DiffNet clearly helps over mean CLIP features.
+
+3. E2 diff_pgm_mean, MLP:
+
+    Representative run:
+        2026-05-23_E2_diff_pgm_mean_lambda1.0_alphafalse_mlp_7800
+
+    Best validation top-1:
+        17.03%
+
+    Interpretation:
+        Naive PGM smoothing followed by mean pooling does not significantly
+        improve over E1. This supports the idea that mean pooling hides much of
+        the PGM inference signal.
+
+4. E1.5 diff_info_accum, MLP:
+
+    Representative run:
+        2026-05-23_E1.5_diff_info_accum_lambdanone_alphatrue_mlp_afcc
+
+    Best validation top-1:
+        12.40%
+
+    Interpretation:
+        With a simple MLP classifier, the accumulator alone did not help.
+
+5. E3 diff_pgm_info_accum, MLP:
+
+    Representative run:
+        2026-05-23_E3_diff_pgm_info_accum_lambda1.0_alphatrue_mlp_e823
+
+    Best validation top-1:
+        13.02%
+
+    Interpretation:
+        With a simple MLP classifier, the full E3 PGM accumulator model did not
+        beat E1.
+
+6. E1.5 with temporal evidence attention:
+
+    Run:
+        2026-05-24_E1.5_diff_info_accum_lambdanone_alphatrue_temporal_evidence_attention_f834
+
+    Best validation top-1:
+        21.76%
+
+    Best epoch:
+        25
+
+    Final train top-1:
+        62.35%
+
+    Final validation top-1:
+        19.66%
+
+    Interpretation:
+        A stronger classifier can expose useful temporal evidence, but also
+        overfits.
+
+7. E3 post-DiffNet PGM evidence with temporal evidence attention:
+
+    Run:
+        2026-05-24_E3_diff_pgm_info_accum_lambda1.0_alphatrue_temporal_evidence_attention_185a
+
+    Best validation top-1:
+        22.04%
+
+    Best epoch:
+        38
+
+    Final train top-1:
+        75.58%
+
+    Final validation top-1:
+        18.75%
+
+    Interpretation:
+        This is a small PGM-positive result over E1.5 attention:
+
+            22.04% - 21.76% = +0.28 percentage points.
+
+        However, the gain is small and the model overfits.
+
+8. Feature-side learnable PGM + E3 post-DiffNet PGM evidence:
+
+    Run:
+        2026-05-27_E3_diff_pgm_info_accum_lambdaframelearn1.0_alphatrue_temporal_evidence_attention_64b8
+
+    Best validation top-1:
+        22.23%
+
+    Best epoch:
+        25
+
+    Epochs trained:
+        55
+
+    Early stopping:
+        stopped after no validation improvement for 30 epochs.
+
+    Final train top-1:
+        57.28%
+
+    Final validation top-1:
+        19.13%
+
+    Interpretation:
+        This is the strongest single-seed E-series PGM result. It improves
+        slightly over the previous E3 attention run:
+
+            22.23% - 22.04% = +0.19 percentage points.
+
+        It also includes clearer PGM structure, because it has frame-side PGM
+        before DiffNet and relation-side PGM evidence after DiffNet.
+
+
+5.1 Feature-Side PGM Ablation Results
+-------------------------------------
+
+Feature-side PGM experiments on CLIP showed:
+
+    E1 fixed frame PGM lambda=1:
+        best validation top-1 = 15.89%
+
+    E1.5 fixed frame PGM lambda=1:
+        best validation top-1 = 21.71%
+
+    E1.5 fixed frame PGM lambda=5:
+        best validation top-1 = 20.04%
+
+    E1.5 learnable frame PGM, init lambda=1:
+        best validation top-1 = 21.76%
+
+    E3 learnable frame PGM + post-DiffNet PGM:
+        best validation top-1 = 22.23%
+
+    E3 learnable frame PGM + post-DiffNet PGM with stronger regularization
+    (lr=5e-5, weight_decay=2e-3):
+        best validation top-1 = 21.14%
+
+Interpretation:
+
+    - Feature-side PGM is theoretically cleaner than smoothing DiffNet outputs.
+    - Fixed lambda=1 made only small changes to CLIP embeddings.
+    - Fixed lambda=5 over-smoothed and hurt accuracy.
+    - Learnable frame PGM stayed close to weak smoothing.
+    - The best E-series result combines frame-side PGM with E3 post-DiffNet PGM
+      evidence, but the accuracy gain is modest.
+
+
+6. ResNet Results And Diagnosis
+-------------------------------
+
+ResNet experiments were conducted to test whether spatial CNN features preserve
+pose information better than CLIP global embeddings.
+
+Feature types:
+
+    ResNet50 global pooled:
+        [N, 16, 2048]
+
+    ResNet50 layer4 spatial:
+        [N, 16, 49, 2048]
+
+    ResNet50 layer3 spatial:
+        [N, 16, 196, 1024]
+
+Representative Layer4 five-model ablation results on spatial features:
+
+    E0 feature_mean:
+        best validation top-1 around 8.59% in the 10-epoch run;
+        later around 9.40% in a longer run.
+
+    E1 diff_mean:
+        best validation top-1 around 7.97% in the 10-epoch run;
+        later around 11.31% in a longer run.
+
+    E1.5 diff_info_accum:
+        best validation top-1 around 7.01%.
+
+    E2 diff_pgm_mean:
+        best validation top-1 around 7.97%.
+
+    E3 diff_pgm_info_accum:
+        best validation top-1 around 7.35% in the 10-epoch run;
+        later around 9.73% in a longer run.
+
+Representative Layer3 results:
+
+    Layer3 compact E1:
+        best validation top-1 around 8.54%.
+
+    Layer3 simple-concat E1:
+        best validation top-1 around 7.60%.
+
+Diagnosis:
+
+    ResNet global features likely discard important spatial pose cues through
+    global average pooling. ResNet spatial features preserve local information,
+    but the lightweight heads tested so far did not extract it effectively.
+    In contrast, frozen CLIP global features provided stronger baseline
+    performance. Therefore, current report-quality experiments should focus on
+    CLIP features and PGM placement.
+
+
+7. P-Series Simplified Model Family
+-----------------------------------
+
+The P-series was created to produce a cleaner PGM-centered experiment. It
+removes the large temporal evidence attention classifier and removes the
+InformationAccumulator. This makes the comparison more controlled:
+
+    same trainable neural architecture
+    same parameter count
+    same optimizer and data
+    only PGM placement/lambda changes
+
+Common input:
+
+    X: [B, 16, 512]
+
+Architecture components:
+
+1. TemporalProjection
+
+    Per-frame projection with no temporal mixing:
+
+        LayerNorm(512)
+        Linear(512 -> 128)
+        GELU
+        LayerNorm(128)
+
+    Output:
+
+        U: [B, 16, 128]
+
+2. Optional pre-trajectory PGM
+
+    Applied before TemporalProjection:
+
+        X -> GaussianFramePGMSmoother -> X_smooth -> TemporalProjection
+
+    In the implementation, prePGM smooths the raw CLIP sequence X.
+
+3. Optional post-projection / pre-DiffNet PGM
+
+    Applied after TemporalProjection:
+
+        X -> TemporalProjection -> U -> GaussianFramePGMSmoother -> Z
+
+    This is called postPGM in the P-series notes because it happens after the
+    frame projection and before the trajectory DiffNet.
+
+4. ProjectedPairwiseDiffNet
+
+    Adjacent pair construction:
+
+        u_t:        [B, 15, 128]
+        u_next:     [B, 15, 128]
+        diff:       u_next - u_t
+        abs_diff:   |u_next - u_t|
+
+        concat [u_t, u_next, diff, abs_diff] -> [B, 15, 512]
+
+    Network:
+
+        Linear(512 -> 256)
+        GELU
+        LayerNorm(256)
+        Dropout(0.25)
+        Linear(256 -> 128)
+
+    Output:
+
+        R: [B, 15, 128]
+
+5. TrajectoryMatrixClassifier
+
+    Flatten temporal relation matrix:
+
+        R: [B, 15, 128]
+        flatten(R): [B, 1920]
+
+    Classifier:
+
+        LayerNorm(1920)
+        Dropout(0.3)
+        Linear(1920 -> 48)
+
+    Output:
+
+        logits: [B, 48]
+
+Trainable parameter count:
+
+    All trajectory_matrix_linear P-series variants:
+        327,728 trainable parameters.
+
+    Classifier parameters:
+        96,048 trainable parameters.
+
+    PGM parameters:
+        0 trainable parameters for fixed-lambda PGM.
+
+This is a clean comparison because adding the PGM does not add trainable
+capacity.
+
+
+7.1 P-Series Variants
+---------------------
+
+P3 noPGM:
+
+    X -> TemporalProjection -> ProjectedPairwiseDiffNet -> R
+      -> flatten(R) -> classifier -> logits
+
+No Gaussian PGM is used.
+
+P12 prePGM lambda=0.30:
+
+    X -> GaussianFramePGMSmoother(lambda=0.30) -> X_smooth
+      -> TemporalProjection -> ProjectedPairwiseDiffNet -> R
+      -> flatten(R) -> classifier -> logits
+
+This tests whether denoising frozen CLIP observations before trajectory
+extraction helps.
+
+P17 postPGM lambda=0.80:
+
+    X -> TemporalProjection -> U
+      -> GaussianFramePGMSmoother(lambda=0.80) -> Z
+      -> ProjectedPairwiseDiffNet -> R
+      -> flatten(R) -> classifier -> logits
+
+This tests whether smoothing projected frame states before pairwise trajectory
+evidence helps.
+
+
+8. P-Series Experiments
+-----------------------
+
+Training setup:
+
+    Train file:
+        C:\data\diving48_embeddings\clip_vit_b16\train.pt
+
+    Validation file:
+        C:\data\diving48_embeddings\clip_vit_b16\test.pt
+
+    Batch size:
+        128
+
+    Learning rate:
+        1e-4
+
+    Weight decay:
+        1e-3
+
+    Max epochs:
+        120
+
+    Early stopping:
+        patience 30 epochs without validation improvement.
+
+    Seeds for multi-seed confirmation:
+        0, 1, 2
+
+
+8.1 P-Series Lambda Sweep
+-------------------------
+
+Post-projection PGM sweep:
+
+    lambda values tested:
+        0.05, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 1.00
+
+Pre-trajectory PGM sweep:
+
+    lambda values tested:
+        0.05, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 1.00
+
+Main sweep artifacts:
+
+    outputs/analysis/p_series_postpgm_lambda_sweep_full.png
+    outputs/analysis/p_series_prepgm_lambda_sweep_full.png
+    outputs/analysis/p_series_pgm_layer_lambda_comparison_full.png
+
+The sweep suggested:
+
+    - PrePGM has its best region around lambda=0.30.
+    - PostPGM has its best region around lambda=0.80.
+    - Too much or too little smoothing can reduce validation accuracy.
+
+
+8.2 P-Series Multi-Seed Confirmation
+------------------------------------
+
+Core multi-seed comparison:
+
+    P3 noPGM
+    P12 prePGM lambda=0.30
+    P17 postPGM lambda=0.80
+
+Aggregate results:
+
+    Model                         Mean Best Val Top-1   Std       Min       Max       Seeds
+    P3 noPGM                      0.1527               0.0044    0.1479    0.1565    3
+    P12 prePGM lambda=0.30         0.1616               0.0043    0.1584    0.1665    3
+    P17 postPGM lambda=0.80        0.1651               0.0041    0.1608    0.1689    3
+
+Per-seed results:
+
+    P3 noPGM:
+        seed 0: best val top-1 = 0.1565, best epoch = 18
+        seed 1: best val top-1 = 0.1536, best epoch = 27
+        seed 2: best val top-1 = 0.1479, best epoch = 10
+
+    P12 prePGM lambda=0.30:
+        seed 0: best val top-1 = 0.1665, best epoch = 18
+        seed 1: best val top-1 = 0.1598, best epoch = 27
+        seed 2: best val top-1 = 0.1584, best epoch = 10
+
+    P17 postPGM lambda=0.80:
+        seed 0: best val top-1 = 0.1689, best epoch = 18
+        seed 1: best val top-1 = 0.1656, best epoch = 16
+        seed 2: best val top-1 = 0.1608, best epoch = 10
+
+Key improvements:
+
+    P12 prePGM over P3 noPGM:
+        0.1616 - 0.1527 = 0.0089 absolute
+        about +0.89 percentage points
+
+    P17 postPGM over P3 noPGM:
+        0.1651 - 0.1527 = 0.0124 absolute
+        about +1.24 percentage points
+
+    P17 postPGM over P12 prePGM:
+        0.1651 - 0.1616 = 0.0035 absolute
+        about +0.35 percentage points
+
+Interpretation:
+
+    Both PGM placements improved over the noPGM trajectory baseline across the
+    current 3-seed comparison. Post-projection PGM with lambda=0.80 was the
+    strongest P-series setting.
+
+Important report claim:
+
+    Since all P-series variants have the same trainable parameter count and the
+    fixed Gaussian PGM has zero trainable parameters, the performance gain is
+    attributable to the PGM smoothing operation rather than increased neural
+    model capacity.
+
+
+9. Main Scientific Interpretation
+---------------------------------
+
+The strongest report-friendly conclusion is:
+
+    A lightweight Gaussian-chain PGM can improve frozen-feature video
+    classification when placed at a suitable temporal representation level.
+
+More detailed interpretation:
+
+1. Pairwise temporal modeling helps.
+
+    CLIP E1 diff_mean improved strongly over E0 feature_mean:
+
+        E0: 11.93%
+        E1: 17.37%
+
+    This shows that adjacent-frame temporal relation features are useful for
+    Diving48.
+
+2. Naive post-DiffNet smoothing plus mean pooling is weak.
+
+    E2 did not clearly improve over E1. This suggests that simply smoothing R
+    and taking mean(Y) hides the PGM signal.
+
+3. PGM evidence is more useful when exposed to a stronger temporal classifier.
+
+    E3 with temporal evidence attention slightly improved over E1.5 attention:
+
+        E1.5 attention: 21.76%
+        E3 attention:   22.04%
+
+    The gain is small, but directionally supports the PGM evidence design.
+
+4. Feature-side PGM is conceptually cleaner but not automatically better.
+
+    Smoothing raw CLIP features before DiffNet is theoretically appealing
+    because CLIP frame embeddings are direct observations, whereas DiffNet
+    outputs are directional relation vectors.
+
+    Empirically:
+
+        fixed lambda=1 was almost neutral,
+        fixed lambda=5 hurt,
+        learnable frame PGM stayed weak,
+        feature-side PGM + E3 reached 22.23%.
+
+5. P-series gives the cleanest PGM evidence.
+
+    The P-series removes the large attention classifier and keeps parameter
+    counts identical. In that setting, PGM smoothing improved the mean validation
+    top-1 across 3 seeds:
+
+        noPGM:        15.27%
+        prePGM:       16.16%
+        postPGM:      16.51%
+
+    Therefore, the best course-project story is not "we reached 60% accuracy."
+    The better story is "we designed controlled PGM ablations and found a
+    consistent PGM benefit under a clean fixed-capacity setup."
+
+
+10. Why Accuracy Is Still Far Below 60%
+---------------------------------------
+
+The current best validation top-1 is far below 60%. Likely reasons:
+
+1. Frozen global frame embeddings are limited.
+
+    CLIP global pooled embeddings compress each frame into one vector. Diving48
+    requires fine-grained pose, rotation, takeoff, twist, and entry-phase cues.
+    These details may be weakly represented in global CLIP features.
+
+2. No end-to-end video backbone is trained.
+
+    The visual backbone is frozen. The trainable head must infer action classes
+    from precomputed frame-level features only.
+
+3. Temporal sampling is sparse.
+
+    Each video is represented by 16 sampled frames. Some diving actions differ
+    by subtle temporal phase or body configuration, which may be missed.
+
+4. Diving48 is fine-grained.
+
+    Many classes are visually similar, and the difference can depend on the
+    number of rotations/twists or body pose during short windows.
+
+5. Lightweight heads underfit visual complexity or overfit validation.
+
+    The larger E-series attention heads achieved higher validation accuracy but
+    showed overfitting: training accuracy rose strongly while validation loss
+    increased after the best epoch.
+
+6. PGM smoothing is not a substitute for missing visual information.
+
+    PGM can improve temporal consistency, but it cannot recover pose details
+    that are absent from the frozen representation.
+
+
+11. Recommended LaTeX Report Structure
+--------------------------------------
+
+Title:
+
+    Gaussian-Chain PGM Smoothing for Frozen-Feature Diving Action Classification
+
+Abstract:
+
+    Summarize the problem, frozen CLIP setup, Gaussian-chain PGM, and the main
+    P-series multi-seed result.
+
+Introduction:
+
+    - Diving48 is fine-grained and temporally sensitive.
+    - Frozen image features lack explicit temporal reasoning.
+    - Research question: can a lightweight PGM improve temporal reasoning?
+
+Related / Background:
+
+    - Frozen frame features.
+    - Pairwise temporal relations.
+    - Gaussian Markov random fields / path graph smoothing.
+
+Method:
+
+    - Define input X.
+    - Define Gaussian-chain PGM.
+    - Define P-series trajectory model.
+    - Define prePGM and postPGM placements.
+    - Optionally describe E-series as extended model.
+
+Experiments:
+
+    - Dataset and split.
+    - Feature extraction.
+    - Training details.
+    - P-series lambda sweep.
+    - 3-seed confirmation.
+
+Results:
+
+    - Main multi-seed P-series table.
+    - Optional E-series best result table.
+    - Optional plot references.
+
+Discussion:
+
+    - Why PGM helps.
+    - Why postPGM can outperform prePGM.
+    - Why absolute accuracy remains limited.
+    - Why E-series accuracy is higher but less clean as evidence.
+
+Limitations:
+
+    - Frozen global CLIP features.
+    - Validation split used as test.pt.
+    - 3 seeds only.
+    - No final held-out test claim.
+    - No end-to-end video training.
+
+Conclusion:
+
+    - Fixed Gaussian-chain PGM improves a lightweight trajectory model at equal
+      parameter count.
+    - Best P-series result: postPGM lambda=0.80, mean best val top-1 16.51%.
+    - Best single-seed E-series result: feature-side learnable PGM + E3, 22.23%.
+
+
+12. Suggested Abstract Draft
+----------------------------
+
+This project investigates whether probabilistic graphical model smoothing can
+improve fine-grained video classification when using frozen visual features.
+We study Diving48 V2 using frozen CLIP ViT-B/16 frame embeddings sampled at 16
+frames per video. We model the temporal feature sequence with a Gaussian-chain
+PGM, where latent states are inferred by minimizing an observation-fidelity term
+and a temporal smoothness term over a path graph. We evaluate both a larger
+DiffNet-PGM-InformationAccumulator model family and a simplified P-series
+trajectory-matrix model designed for controlled PGM ablations. In the clean
+P-series setting, all variants have the same 327,728 trainable parameters and
+the fixed PGM adds zero trainable parameters. Across three random seeds, the
+no-PGM trajectory baseline obtains 15.27% mean best validation top-1, while
+pre-trajectory PGM smoothing with lambda=0.30 obtains 16.16% and post-projection
+PGM smoothing with lambda=0.80 obtains 16.51%. These results suggest that
+Gaussian-chain PGM inference can provide a modest but consistent benefit for
+temporal classification from frozen frame features. A larger E-series model
+with feature-side learnable PGM and PGM evidence accumulation reaches 22.23%
+single-seed validation top-1, but its larger attention classifier makes it less
+clean as the main causal PGM comparison.
+
+
+13. Suggested Method Text
+-------------------------
+
+Let X = (X_1, ..., X_T) denote the frozen frame feature sequence for a video,
+where T=16 and X_t in R^512 is a CLIP ViT-B/16 frame embedding. We use a
+Gaussian-chain PGM to infer temporally smoothed latent states Z by solving
+
+    Z* = argmin_Z alpha sum_t ||Z_t - X_t||_2^2
+                  + lambda sum_t ||Z_t - Z_{t-1}||_2^2.
+
+This is equivalent to MAP inference in a Gaussian Markov random field on a
+temporal path graph. If L is the path graph Laplacian, the MAP solution is
+obtained by solving
+
+    (alpha I + lambda L) Z = alpha X.
+
+The smoother is deterministic and introduces no trainable parameters when
+lambda is fixed.
+
+For the simplified P-series experiments, each frame is first projected from
+512 dimensions to 128 dimensions using a per-frame MLP. Adjacent projected
+states are then converted into pairwise relation features by concatenating the
+two states, their difference, and the absolute difference. The resulting
+relation matrix R in R^{15 x 128} is flattened and classified with a linear
+trajectory-matrix classifier. We compare three PGM placements: no PGM,
+pre-trajectory PGM applied to CLIP frame observations before projection, and
+post-projection PGM applied after frame projection but before pairwise relation
+construction.
+
+
+14. Suggested Results Text
+--------------------------
+
+The cleanest evidence for the value of PGM smoothing comes from the P-series
+multi-seed experiment. Because all P-series variants have identical trainable
+parameter counts and the fixed Gaussian PGM has zero trainable parameters, this
+comparison isolates the effect of temporal MAP smoothing. The no-PGM baseline
+achieves 15.27% mean best validation top-1 across three seeds. Applying the PGM
+before trajectory extraction improves this to 16.16%, while applying the PGM
+after frame projection and before pairwise trajectory construction improves it
+to 16.51%. Thus, both PGM placements improve over the no-PGM baseline, with
+post-projection smoothing giving the strongest result.
+
+The larger E-series experiments show that additional temporal modeling capacity
+can improve accuracy further. The best E-series single-seed run combines
+feature-side learnable PGM smoothing, post-DiffNet PGM evidence, an
+InformationAccumulator, and a temporal evidence attention classifier. It reaches
+22.23% validation top-1. However, this model has substantially more trainable
+parameters and a large attention classifier, so the P-series remains the cleaner
+PGM ablation for the main report claim.
+
+
+15. Suggested Discussion Text
+-----------------------------
+
+The results suggest that the location of PGM smoothing matters. Directly
+smoothing final class evidence is not the goal; rather, the PGM should smooth a
+temporal representation where neighboring states are expected to vary smoothly.
+The P-series post-projection smoother likely works well because the projected
+frame states are lower-dimensional and motion-relevant, making them easier to
+regularize than raw CLIP embeddings. Pre-trajectory smoothing also helps, but
+it may be less effective because CLIP frame embeddings can contain semantic
+changes that should not be overly smoothed. Excessive smoothing can suppress
+valid temporal transitions, which explains why lambda must be tuned.
+
+At the same time, the absolute accuracy remains modest. This should not be
+interpreted as a failure of the PGM idea alone. The experiments use frozen
+global frame embeddings, while Diving48 requires subtle pose, rotation, and
+phase cues. A Gaussian PGM can improve temporal consistency, but it cannot
+recover visual information that is missing from the frozen representation.
+
+
+16. Key Files And Artifacts
+---------------------------
+
+Core model files:
+
+    models/embedding_difference_pgm_model.py
+    models/p_series_trajectory_matrix.py
+    models/pairwise_diff_net.py
+    models/gaussian_pgm_smoother.py
+    models/information_matrix_accumulator.py
+    models/classifier.py
+
+Training and experiment scripts:
+
+    scripts/train_embeddings.py
+    scripts/runpod_full_start.py
+    scripts/smoke_test_p_series.py
+    scripts/train_p_series_core_multiseed.ps1
+    scripts/train_p_series_lambda_050_100.ps1
+    scripts/plot_training.py
+
+Important configs:
+
+    configs/default_clip_vit_b16_feature_pgm.yaml
+    configs/default_clip_vit_b16_pgm_evidence_attention.yaml
+    configs/p_series/P3_trajectory_matrix_linear_noPGM.yaml
+    configs/p_series/P12_prePGM_lam030_trajectory_matrix_linear.yaml
+    configs/p_series/P17_trajectory_matrix_linear_pgm_lam080.yaml
+
+Important docs:
+
+    docs/clip_e_model_structures.md
+    docs/p_series_report_structure.md
+    docs/layer4_ablation_design.md
+    docs/model_structures.md
+
+Important result artifacts:
+
+    outputs/analysis/p_series_core_multiseed_aggregate.csv
+    outputs/analysis/p_series_core_multiseed_summary.csv
+    outputs/analysis/p_series_core_multiseed_comparison.png
+    outputs/analysis/p_series_postpgm_lambda_sweep_full.png
+    outputs/analysis/p_series_prepgm_lambda_sweep_full.png
+    outputs/analysis/p_series_pgm_layer_lambda_comparison_full.png
+
+Best E-series run:
+
+    outputs/runs/2026-05-27_E3_diff_pgm_info_accum_lambdaframelearn1.0_alphatrue_temporal_evidence_attention_64b8
+
+Best P-series core run, seed 0:
+
+    outputs/p_series/P17_trajectory_matrix_linear_pgm_lam080
+
+P-series multi-seed directory:
+
+    outputs/p_series_multiseed
+
+
+17. Final Report Recommendation
+-------------------------------
+
+For the final course report, the cleanest story is:
+
+    1. Start with frozen CLIP frame embeddings for Diving48.
+    2. Introduce Gaussian-chain PGM smoothing as MAP inference on a temporal
+       path graph.
+    3. Present the P-series trajectory-matrix model as the controlled main
+       experiment.
+    4. Show that fixed PGM smoothing improves validation top-1 without adding
+       trainable parameters.
+    5. Use E-series as an extended model showing a higher single-seed result,
+       but be honest that its PGM contribution is harder to isolate because of
+       the large attention classifier.
+
+Best concise claim:
+
+    In a fixed-capacity trajectory-matrix model using frozen CLIP ViT-B/16
+    frame features, Gaussian-chain PGM smoothing improves mean best validation
+    top-1 from 15.27% without PGM to 16.51% with post-projection PGM smoothing
+    across three seeds. This provides controlled evidence that PGM temporal MAP
+    inference can improve frozen-feature video classification.
+
